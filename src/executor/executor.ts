@@ -2,6 +2,12 @@ import { RoutingError, ExecutionError, TimeoutError } from "../errors.js";
 import { AgentRegistry, AgentRegistryRecord } from "../types.js";
 import type { ILlmProvider, ModelConfig } from "../providers/types.js";
 import { createProvider, registryToolToProviderTool } from "../providers/index.js";
+import type { Middleware, MiddlewarePipeline } from "../middleware/types.js";
+import { loadMiddlewareForPath } from "../middleware/loader.js";
+import type { PolicyEnforcer } from "../policy/types.js";
+import { createPolicyContextFromExecutionContext, DefaultPolicyEnforcer } from "../policy/index.js";
+import type { Telemetry } from "../observability/telemetry.js";
+import { createTelemetry } from "../observability/index.js";
 import {
   ExecutionContext,
   SessionFrame,
@@ -26,6 +32,9 @@ export interface ExecutionOptions {
   timeoutMs?: number;
   strictMode?: boolean;
   modelConfig?: ModelConfig;
+  policyEnforcer?: PolicyEnforcer;
+  middlewares?: Middleware[];
+  telemetryEnabled?: boolean;
 }
 
 export interface ExecutionResult {
@@ -35,12 +44,16 @@ export interface ExecutionResult {
   finalOutput?: unknown;
   error?: Error;
   durationMs: number;
+  trace?: any;
 }
 
 export class AfrExecutor {
   private registry: AgentRegistry;
   private options: ExecutionOptions;
   private provider: ILlmProvider | null;
+  private policyEnforcer: PolicyEnforcer;
+  private middlewares: Middleware[];
+  private telemetry: Telemetry | null;
 
   constructor(registry: AgentRegistry, options: ExecutionOptions = {}) {
     this.registry = registry;
@@ -48,11 +61,20 @@ export class AfrExecutor {
       maxDepth: options.maxDepth ?? 10,
       timeoutMs: options.timeoutMs ?? 30000,
       strictMode: options.strictMode ?? false,
-      modelConfig: options.modelConfig
+      modelConfig: options.modelConfig,
+      policyEnforcer: options.policyEnforcer,
+      middlewares: options.middlewares,
+      telemetryEnabled: options.telemetryEnabled ?? true
     };
 
     this.provider = this.options.modelConfig
       ? createProvider(this.options.modelConfig)
+      : null;
+
+    this.policyEnforcer = this.options.policyEnforcer ?? new DefaultPolicyEnforcer();
+    this.middlewares = this.options.middlewares ?? [];
+    this.telemetry = this.options.telemetryEnabled
+      ? createTelemetry("session-id", "trace-id")
       : null;
   }
 
@@ -62,6 +84,10 @@ export class AfrExecutor {
     globalContext: Record<string, unknown> = {}
   ): Promise<ExecutionResult> {
     const startTime = Date.now();
+
+    this.telemetry = this.options.telemetryEnabled
+      ? createTelemetry("session-" + Date.now(), "trace-" + Math.random().toString(36))
+      : null;
 
     try {
       const context = createChildExecutionContext(
@@ -90,10 +116,15 @@ export class AfrExecutor {
         success: true,
         context: frame.context,
         messages: frame.messages,
-        durationMs
+        durationMs,
+        trace: this.telemetry?.trace()
       };
     } catch (error) {
       const durationMs = Date.now() - startTime;
+      if (this.telemetry) {
+        this.telemetry.recordError("root", error instanceof Error ? error : new Error(String(error)));
+      }
+
       return {
         success: false,
         context: createChildExecutionContext(
@@ -114,7 +145,8 @@ export class AfrExecutor {
         ),
         messages: [],
         error: error instanceof Error ? error : new Error(String(error)),
-        durationMs
+        durationMs,
+        trace: this.telemetry?.trace()
       };
     }
   }
@@ -123,42 +155,74 @@ export class AfrExecutor {
     const { context } = frame;
     const startTime = Date.now();
 
-    if (context.depth > (this.options.maxDepth ?? 10)) {
-      throw new ExecutionError(
-        `Max execution depth exceeded at ${context.currentPath} (depth: ${context.depth})`
-      );
+    if (this.telemetry) {
+      this.telemetry.recordAgentStart(context.currentPath);
     }
 
-    if (this.options.timeoutMs && Date.now() - startTime > this.options.timeoutMs) {
-      throw new TimeoutError(`Execution timed out at ${context.currentPath}`);
-    }
-
-    const record = this.registry.records[context.currentPath];
-    if (!record) {
-      throw new RoutingError(
-        `Agent path not found in registry: ${context.currentPath}. Available paths: ${Object.keys(this.registry.records).join(", ")}.`
-      );
-    }
-
-    const mergedContext = mergeContextWithLocalConfig(context, record.config);
-    frame.context = mergedContext;
-
-    frame.messages.push(
-      createSystemMessage(
-        record.definition?.systemPrompt ??
-          `You are the ${record.logicalPath} agent. You have access to the following tools: ${record.tools.map((t) => t.name).join(", ")}`
-      )
-    );
-
-    const toolCallResult = await this.simulateLlmCall(record, frame);
-
-    if (toolCallResult && toolCallResult.toolCalls && toolCallResult.toolCalls.length > 0) {
-      frame.messages.push(toolCallResult);
-
-      for (const toolCall of toolCallResult.toolCalls) {
-        const childResult = await this.handleToolCall(toolCall, frame);
-        frame.messages.push(childResult);
+    try {
+      if (context.depth > (this.options.maxDepth ?? 10)) {
+        throw new ExecutionError(
+          `Max execution depth exceeded at ${context.currentPath} (depth: ${context.depth})`
+        );
       }
+
+      if (this.options.timeoutMs && Date.now() - startTime > this.options.timeoutMs) {
+        throw new TimeoutError(`Execution timed out at ${context.currentPath}`);
+      }
+
+      const record = this.registry.records[context.currentPath];
+      if (!record) {
+        throw new RoutingError(
+          `Agent path not found in registry: ${context.currentPath}. Available paths: ${Object.keys(this.registry.records).join(", ")}.`
+        );
+      }
+
+      const mergedContext = mergeContextWithLocalConfig(context, record.config);
+      frame.context = mergedContext;
+
+      const systemPrompt =
+        record.definition?.systemPrompt ??
+        `You are the ${record.logicalPath} agent. You have access to the following tools: ${record.tools.map((t) => t.name).join(", ")}`;
+
+      let messages = frame.messages;
+      messages.push(createSystemMessage(systemPrompt));
+
+      frame.messages = messages;
+
+      const toolCallResult = await this.simulateLlmCall(record, frame);
+
+      if (toolCallResult && toolCallResult.toolCalls && toolCallResult.toolCalls.length > 0) {
+        frame.messages.push(toolCallResult);
+
+        for (const toolCall of toolCallResult.toolCalls) {
+          if (this.telemetry) {
+            this.telemetry.recordToolCall(context.currentPath, toolCall.toolName);
+          }
+
+          const childResult = await this.handleToolCall(toolCall, frame);
+          frame.messages.push(childResult);
+
+          if (this.telemetry) {
+            this.telemetry.recordToolResult(
+              context.currentPath,
+              toolCall.toolName,
+              (childResult as any).isError ?? false
+            );
+          }
+        }
+      }
+
+      if (this.telemetry) {
+        this.telemetry.recordAgentEnd(context.currentPath, Date.now() - startTime);
+      }
+    } catch (error) {
+      if (this.telemetry) {
+        this.telemetry.recordError(
+          context.currentPath,
+          error instanceof Error ? error : new Error(String(error))
+        );
+      }
+      throw error;
     }
   }
 
