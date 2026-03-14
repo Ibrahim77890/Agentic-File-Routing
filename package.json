@@ -1,0 +1,27 @@
+{
+  "name": "agentic-file-routing",
+  "version": "0.1.0",
+  "description": "AFR: File-system routed hierarchical agent runtime",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "if exist dist rmdir /s /q dist"
+  },
+  "keywords": [
+    "agents",
+    "llm",
+    "routing",
+    "orchestration",
+    "afr"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.2"
+  }
+}

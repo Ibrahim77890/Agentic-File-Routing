@@ -1,0 +1,62 @@
+export interface AgentTool {
+  name: string;
+  description: string;
+  schema: Record<string, unknown>;
+  targetPath: string;
+  routePattern: string;
+}
+
+export interface AgentDefinition {
+  id?: string;
+  name: string;
+  description: string;
+  model?: string;
+  systemPrompt: string;
+  inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  tools?: AgentTool[];
+  config?: {
+    timeoutMs?: number;
+    retries?: number;
+    tags?: string[];
+  };
+}
+
+export type SegmentKind = "static" | "dynamic" | "catch-all";
+
+export interface SegmentDescriptor {
+  raw: string;
+  kind: SegmentKind;
+  paramName?: string;
+}
+
+export interface DiscoveredAgentNode {
+  dirPath: string;
+  entryFilePath: string;
+  segmentsFromRoot: SegmentDescriptor[];
+  children: DiscoveredAgentNode[];
+}
+
+export interface AgentRegistryRecord {
+  logicalPath: string;
+  routePattern: string;
+  dirPath: string;
+  entryFilePath: string;
+  segmentParams: string[];
+  config: Record<string, unknown>;
+  tools: AgentTool[];
+  childrenPaths: string[];
+  definition?: AgentDefinition;
+}
+
+export interface AgentRegistry {
+  rootPath: string;
+  records: Record<string, AgentRegistryRecord>;
+}
+
+export interface BuildRegistryOptions {
+  agentsRootDir: string;
+  rootLogicalPath?: string;
+  loadDefinitions?: boolean;
+  strictDefinitionLoading?: boolean;
+}
