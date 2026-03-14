@@ -1,16 +1,22 @@
 {
   "name": "agentic-file-routing",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AFR: File-system routed hierarchical agent runtime",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "create-afr-agent": "./bin/create-afr-agent.mjs"
+  },
   "files": [
-    "dist"
+    "dist",
+    "bin"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "clean": "if exist dist rmdir /s /q dist"
+    "clean": "if exist dist rmdir /s /q dist",
+    "test": "node --test dist/tests/**/*.test.js",
+    "test:watch": "tsc -p tsconfig.json --watch"
   },
   "keywords": [
     "agents",
