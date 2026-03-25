@@ -6,6 +6,16 @@ export interface AgentTool {
   routePattern: string;
 }
 
+/**
+ * MCP (Model Context Protocol) configuration for an agent
+ * Defines which MCP servers are available in this scope
+ */
+export interface AgentMCPConfig {
+  hasMcpConfig: boolean;
+  mcpConfigPath?: string;
+  config?: Record<string, unknown>; // MCPToolsConfig from mcp/types
+}
+
 export interface AgentDefinition {
   id?: string;
   name: string;
@@ -48,6 +58,7 @@ export interface AgentRegistryRecord {
   childrenPaths: string[];
   definition?: AgentDefinition;
   sequentialWorkflow?: SequentialWorkflowMetadata;
+  mcpConfig?: AgentMCPConfig;
 }
 
 export interface AgentRegistry {

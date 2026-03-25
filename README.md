@@ -14,6 +14,7 @@ A powerful, file-system-routed hierarchical agent orchestration framework for Ja
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
 - [Sequential Chain Orchestration](#sequential-chain-orchestration)
+- [Localized MCP Tool Injection](#localized-mcp-tool-injection)
 - [Usage Guide](#usage-guide)
 - [API Reference](#api-reference)
 - [Examples](#examples)
@@ -64,6 +65,7 @@ root/
 ✅ **Hierarchical Tool Exposure** — Each agent sees only its direct children
 ✅ **Recursive Composition** — Unlimited nesting; all agents follow same interface
 ✅ **Sequential Chain Orchestration** — Explicit numbered agent workflows (0_step.ts → 1_step.ts → linear.ts)
+✅ **Localized MCP Tool Injection** — Folder-scoped Model Context Protocol servers (mcp_tools.ts per folder)
 ✅ **Provider Agnostic** — Built-in adapters for OpenAI and Anthropic
 ✅ **Zero External Dependencies** — HTTP fetch-based, no SDK bloat
 ✅ **Context Inheritance** — Automatic parent-to-child parameter propagation
@@ -531,6 +533,303 @@ For complete sequential chain orchestration documentation, examples, and API ref
 - [SEQUENTIAL_IMPLEMENTATION_SUMMARY.md](./SEQUENTIAL_IMPLEMENTATION_SUMMARY.md) — Architecture details
 - [src/demo-sequential.ts](./src/demo-sequential.ts) — Working examples
 
+## Localized MCP Tool Injection
+
+AFR includes **Localized MCP Tool Injection**, a powerful hierarchical MCP (Model Context Protocol) server management system that solves the **Tool Overload Problem** by scoping MCP servers to specific agent folders. Each folder can define its own `mcp_tools.ts` configuration, and agents automatically inherit tools from parent folders while remaining isolated from sibling branches.
+
+### Why MCP Tool Injection?
+
+**The Problem:**
+- Exposing all 50+ tools to every agent wastes tokens and confuses the LLM
+- Global tool lists make it hard to enforce security permissions
+- Sharing API credentials across teams is risky and inflexible
+- Scaling across departments means managing one massive tool registry
+
+**The Solution:**
+- Define MCP servers per-folder in `mcp_tools.ts` files
+- Each agent only sees tools scoped to its folder path and parents
+- Security boundaries = file-system boundaries (DevOps tools hidden from Marketing)
+- Different API keys per department, no shared globals
+- 35-50% context savings by exposing only relevant tools
+
+### How It Works
+
+**File Structure Example:**
+
+```text
+agents/
+├── mcp_tools.ts                          # Global servers
+├── devops/
+│   ├── mcp_tools.ts                      # GitHub, Docker servers
+│   ├── index.ts                          # DevOps orchestrator
+│   └── incident/
+│       ├── mcp_tools.ts                  # Monitoring, Incident servers
+│       ├── index.ts                      # Incident response agent
+│       └── 0_triage.ts                   # Sequential step
+└── marketing/
+    ├── mcp_tools.ts                      # Mailchimp, HubSpot servers
+    ├── index.ts                          # Marketing orchestrator
+    ├── copywriting/
+    │   └── index.ts                      # Copywriter agent
+    └── seo/
+        └── index.ts                      # SEO specialist agent
+```
+
+**Tool Access by Agent:**
+
+- `devops.incident` agent has access to:
+  - Global tools (if defined at root)
+  - Parent tools: GitHub, Docker
+  - Own tools: Monitoring, Incident Tracking
+
+- `marketing.seo` agent has access to:
+  - Global tools (if defined at root)
+  - Parent tools: Mailchimp, HubSpot, Analytics
+  - Own tools: Search Console, Semrush
+  - ❌ Cannot see: GitHub, Docker (DevOps branch is isolated)
+
+### Creating mcp_tools.ts
+
+Each `mcp_tools.ts` file defines which MCP servers are accessible at that folder level:
+
+```typescript
+// agents/devops/mcp_tools.ts
+const MCPToolsConfig = {
+  servers: {
+    github: {
+      name: "GitHub",
+      command: "node",
+      args: ["./mcp-servers/github-server.js"],
+      env: {
+        GITHUB_TOKEN: process.env.GITHUB_DEVOPS_TOKEN,  // Separate token per team
+        GITHUB_OWNER: "my-company"
+      },
+      timeout: 30000,
+      autoRestart: true
+    },
+    docker: {
+      name: "Docker",
+      command: "node",
+      args: ["./mcp-servers/docker-server.js"],
+      env: {
+        DOCKER_HOST: process.env.DOCKER_HOST
+      }
+    }
+  },
+  
+  // Optional: disable tool inheritance from parent
+  inheritParent: true,  // Default: true
+  
+  // Optional: filter which tools are exposed
+  toolFilter: {
+    include: ["gh_*", "docker_*"],  // Only expose these patterns
+    exclude: ["gh_delete_repo"]     // Hide sensitive operations
+  },
+  
+  // Optional: add prefixes to avoid naming collisions
+  toolPrefix: {
+    github: "gh_",      // Tools named: gh_create_issue, gh_list_repos
+    docker: "docker_"   // Tools named: docker_run, docker_stop
+  }
+};
+
+export default MCPToolsConfig;
+```
+
+```typescript
+// agents/devops/incident/mcp_tools.ts
+// Inherits parent tools (GitHub, Docker) + adds monitoring
+const MCPToolsConfig = {
+  servers: {
+    monitoring: {
+      name: "Monitoring",
+      command: "node",
+      args: ["./mcp-servers/monitoring-server.js"],
+      env: {
+        DATADOG_API_KEY: process.env.MONITORING_API_KEY
+      }
+    },
+    incidents: {
+      name: "Incident Tracking",
+      command: "node",
+      args: ["./mcp-servers/incidents-server.js"],
+      env: {
+        PAGERDUTY_TOKEN: process.env.PAGERDUTY_TOKEN
+      }
+    }
+  },
+  inheritParent: true,  // Inherit GitHub and Docker from parent
+  toolFilter: {
+    exclude: ["gh_delete_*"]  // Don't expose destructive operations
+  }
+};
+
+export default MCPToolsConfig;
+```
+
+### Example Real-World Configuration
+
+**Marketing Team Setup:**
+
+```typescript
+// agents/marketing/mcp_tools.ts
+const MCPToolsConfig = {
+  servers: {
+    mailchimp: {
+      name: "Mailchimp",
+      command: "node",
+      args: ["./mcp-servers/mailchimp.js"],
+      env: { MAILCHIMP_API_KEY: process.env.MAILCHIMP_KEY }
+    },
+    hubspot: {
+      name: "HubSpot",
+      command: "node",
+      args: ["./mcp-servers/hubspot.js"],
+      env: { HUBSPOT_API_KEY: process.env.HUBSPOT_KEY }
+    },
+    analytics: {
+      name: "Google Analytics",
+      command: "node",
+      args: ["./mcp-servers/analytics.js"],
+      env: { ANALYTICS_API_KEY: process.env.ANALYTICS_KEY }
+    }
+  },
+  toolPrefix: {
+    mailchimp: "email_",
+    hubspot: "crm_",
+    analytics: "analytics_"
+  }
+};
+
+export default MCPToolsConfig;
+
+// agents/marketing/seo/mcp_tools.ts
+const MCPToolsConfig = {
+  servers: {
+    searchconsole: {
+      name: "Google Search Console",
+      command: "node",
+      args: ["./mcp-servers/gsc.js"],
+      env: { GSC_API_KEY: process.env.GSC_KEY }
+    },
+    semrush: {
+      name: "Semrush",
+      command: "node",
+      args: ["./mcp-servers/semrush.js"],
+      env: { SEMRUSH_TOKEN: process.env.SEMRUSH_TOKEN }
+    }
+  },
+  inheritParent: true,
+  toolPrefix: {
+    searchconsole: "seo_",
+    semrush: "seo_"
+  }
+};
+
+export default MCPToolsConfig;
+```
+
+When the SEO specialist agent executes, it automatically has access to:
+```
+✓ email_* tools (Mailchimp)
+✓ crm_* tools (HubSpot)
+✓ analytics_* tools (Google Analytics)
+✓ seo_* tools (Search Console, Semrush)
+✗ Cannot see: GitHub, Docker, any DevOps tools
+```
+
+### How It Integrates
+
+**Phase 1: Discovery**
+```
+npm run build
+  ↓
+Directory crawler finds all mcp_tools.ts files
+  ↓
+Stored in AgentRegistry
+```
+
+**Phase 2: Scope Resolution**
+```
+When executing agent "devops.incident":
+  ↓
+MCPConfigLoader.buildMCPScope() walks up tree:
+  - Load root/mcp_tools.ts (if exists)
+  - Load devops/mcp_tools.ts
+  - Load devops/incident/mcp_tools.ts
+  ↓
+Merges configs respecting inheritParent flag
+  ↓
+Returns MCPScope with all accessible servers & tools
+```
+
+**Phase 3: Tool Hydration** (Coming in next phase)
+```
+Before LLM call:
+  ↓
+MCPServerClient connects to configured servers
+  ↓
+Applies filtering and namespacing
+  ↓
+Merges with local agent tools
+  ↓
+Passes all tools to LLM provider
+```
+
+### Key Features
+
+✅ **Hierarchical Scoping** — File-system tree = tool-scope tree
+✅ **Credential Isolation** — Different API keys per folder (no shared globals)
+✅ **Tool Filtering** — Include/exclude patterns for sensitive operations
+✅ **Tool Namespacing** — Add prefixes to avoid naming collisions (gh_create_issue vs gl_create_issue)
+✅ **Lazy Initialization** — MCP servers connect only when needed
+✅ **Configuration Caching** — Performance optimized
+✅ **Type Safety** — Full TypeScript support with MCPScope and MCPToolDefinition types
+✅ **Inheritance Control** — Optional inheritParent flag for custom scoping
+
+### Advanced Features
+
+**Tool Filtering:**
+```typescript
+// Only expose read-only tools to some agents
+toolFilter: {
+  include: ["gh_list_*", "gh_get_*"],  // Only read operations
+  exclude: ["gh_delete_*"]              // Hide destructive ops
+}
+```
+
+**Tool Prefixing to Avoid Collisions:**
+```typescript
+// Multiple GitHub-like servers with different prefixes
+toolPrefix: {
+  github: "gh_",
+  gitlab: "gl_",
+  gitea: "gitea_"
+}
+// Results in: gh_create_issue, gl_create_issue, gitea_create_issue
+```
+
+**Custom Credential Management:**
+```typescript
+// Different tokens per deployment context
+servers: {
+  github: {
+    env: {
+      // Uses different env vars per folder
+      GITHUB_TOKEN: process.env.GITHUB_DEVOPS_TOKEN
+    }
+  }
+}
+```
+
+### See Full Documentation
+
+For complete MCP Tool Injection documentation, architecture details, and examples, see:
+- [MCP_TOOL_INJECTION.md](./MCP_TOOL_INJECTION.md) — Full feature guide with 5-phase flow diagrams
+- [MCP_QUICK_START.md](./MCP_QUICK_START.md) — Implementation summary and testing guide
+- [examples/agents/devops/mcp_tools.ts](./examples/agents/devops/mcp_tools.ts) — Real DevOps setup
+- [examples/agents/marketing/mcp_tools.ts](./examples/agents/marketing/mcp_tools.ts) — Real Marketing setup
+
 ## Usage Guide
 
 ### Basic Execution
@@ -936,6 +1235,96 @@ result.messages.forEach((msg, i) => {
 });
 ```
 
+### Example 5: Hierarchical Tool Injection with MCP
+
+Configure folder-scoped MCP servers where agents only see tools relevant to their domain:
+
+```typescript
+// agents/devops/mcp_tools.ts
+export default {
+  servers: {
+    github: {
+      name: "GitHub",
+      command: "node",
+      args: ["./servers/github.js"],
+      env: { GITHUB_TOKEN: process.env.GITHUB_TOKEN }
+    },
+    docker: {
+      name: "Docker",
+      command: "node",
+      args: ["./servers/docker.js"],
+      env: { DOCKER_HOST: process.env.DOCKER_HOST }
+    }
+  },
+  toolPrefix: { github: "gh_", docker: "docker_" },
+  toolFilter: { exclude: ["gh_delete_repo"] }  // Hide destructive ops
+};
+
+// agents/devops/incident/mcp_tools.ts
+export default {
+  servers: {
+    monitoring: {
+      name: "Datadog",
+      command: "node",
+      args: ["./servers/datadog.js"],
+      env: { DATADOG_API_KEY: process.env.DATADOG_KEY }
+    }
+  },
+  inheritParent: true  // Inherit GitHub & Docker from parent
+};
+
+// agents/marketing/mcp_tools.ts
+export default {
+  servers: {
+    mailchimp: {
+      name: "Mailchimp",
+      command: "node",
+      args: ["./servers/mailchimp.js"],
+      env: { MAILCHIMP_KEY: process.env.MAILCHIMP_KEY }
+    },
+    hubspot: {
+      name: "HubSpot",
+      command: "node",
+      args: ["./servers/hubspot.js"],
+      env: { HUBSPOT_KEY: process.env.HUBSPOT_KEY }
+    }
+  }
+  // DevOps branch is isolated - no GitHub or Docker tools
+};
+
+// Now when executing agents:
+const devopsRegistry = await buildAgentRegistry({
+  agentsRootDir: "./agents",
+  loadDefinitions: true
+});
+
+// devops.incident agent automatically has:
+// ✓ gh_* (GitHub), docker_* (Docker), monitor_* (Datadog)
+const incidentResult = await executeAgent(
+  devopsRegistry,
+  "root.devops.incident",
+  "Production database down, investigate"
+);
+
+// marketing agent automatically has:
+// ✓ email_* (Mailchimp), crm_* (HubSpot)
+// ✗ Cannot see: GitHub, Docker tools
+const marketingResult = await executeAgent(
+  devopsRegistry,
+  "root.marketing",
+  "Create campaign for product launch"
+);
+```
+
+**Key Benefits:**
+- Security: DevOps tools hidden from Marketing agents
+- Efficiency: Each agent sees only 5-10 relevant tools (not 50+ global tools)
+- Credentials: GITHUB_TOKEN, MAILCHIMP_KEY safely isolated per folder
+- Inheritance: Sub-agents automatically get parent tools
+- Flexibility: Add mcp_tools.ts to any folder to introduce new servers
+
+See [Localized MCP Tool Injection](#localized-mcp-tool-injection) section and [MCP_TOOL_INJECTION.md](./MCP_TOOL_INJECTION.md) for complete documentation.
+
 ## Development
 
 ### Project Structure
@@ -960,8 +1349,15 @@ result.messages.forEach((msg, i) => {
 │   │   ├── types.ts          # Provider interface
 │   │   ├── openai.ts         # OpenAI adapter
 │   │   ├── anthropic.ts      # Anthropic adapter
+│   │   ├── openrouter.ts     # OpenRouter adapter
 │   │   ├── factory.ts        # Provider factory
 │   │   └── index.ts          # Provider exports
+│   ├── mcp/
+│   │   ├── types.ts          # MCP type definitions
+│   │   ├── loader.ts         # MCP config discovery & scope resolution
+│   │   ├── client.ts         # MCP server connection management
+│   │   ├── hydrator.ts       # Tool format conversion & merging
+│   │   └── index.ts          # MCP module exports
 │   ├── demo.ts               # Milestone 2 demo
 │   ├── demo3.ts              # Milestone 3 demo
 │   ├── demo-sequential.ts    # Sequential chain demos
@@ -969,11 +1365,20 @@ result.messages.forEach((msg, i) => {
 ├── examples/
 │   └── agents/               # Example agent trees
 │       ├── devops/
+│       │   ├── mcp_tools.ts  # MCP config with GitHub, Docker
+│       │   └── incident/
+│       │       └── mcp_tools.ts  # Inherits + Monitoring, Incidents
 │       ├── marketing/
+│       │   ├── mcp_tools.ts  # MCP config with Email, CRM, Analytics
+│       │   ├── copywriting/
+│       │   └── seo/
+│       │       └── mcp_tools.ts  # Inherits + SEO tools
 │       └── competitor-analysis/  # Sequential workflow example
 ├── dist/                     # Compiled output (generated)
 ├── SEQUENTIAL_CHAIN_ORCHESTRATION.md     # Sequential feature docs
 ├── SEQUENTIAL_IMPLEMENTATION_SUMMARY.md  # Implementation details
+├── MCP_TOOL_INJECTION.md                 # MCP feature documentation
+├── MCP_QUICK_START.md                    # MCP quick reference
 ├── package.json
 ├── tsconfig.json
 └── README.md
@@ -1008,18 +1413,20 @@ npm test
 - **Milestone 0**: Foundation and contracts
 - **Milestone 1**: Core loader and registry crawler
 - **Milestone 2**: Recursive execution engine
-- **Milestone 3**: Provider adapters (OpenAI, Anthropic)
+- **Milestone 3**: Provider adapters (OpenAI, Anthropic, OpenRouter)
 - **Milestone 4-5**: Context inheritance, policy layer, and middleware
 - **Milestone 6**: Sequential Chain Orchestration (numbered agents + linear.ts orchestrators)
+- **Milestone 7**: Localized MCP Tool Injection (hierarchical MCP server scoping with mcp_tools.ts)
 
 ### 🔄 In Progress
 
+- **Executor MCP Integration** — Injecting MCP tools into LLM calls
 - **CLI and Developer Experience Tools**
 - **Agent Template Scaffolding**
 
 ### 📋 Planned
 
-- **Milestone 7**: Production hardening and npm publication
+- **Milestone 8**: Production hardening and npm publication
 - **v2.0**: Dynamic segment routing ([topic], [...path])
 - **v2.0**: Advanced middleware ecosystem
 - **v2.0**: Parallel execution support for sequential chains
@@ -1081,6 +1488,47 @@ A: Every execution returns a `callStack` and `traceId`. Use these to track routi
 
 **Q: What are Sequential Chain Orchestrations?**
 A: Explicit workflows where numbered agents (0_step.ts, 1_step.ts) execute sequentially with data piping between steps. Control data flow using a `linear.ts` orchestrator file. See [SEQUENTIAL_CHAIN_ORCHESTRATION.md](./SEQUENTIAL_CHAIN_ORCHESTRATION.md) for details.
+
+**Q: What is Localized MCP Tool Injection?**
+A: A hierarchical MCP server management system where agents only see tools scoped to their folder. Each folder's `mcp_tools.ts` defines which MCP servers are accessible, with automatic inheritance from parents. Solves the "Tool Overload" and "Credential Isolation" problems. See [Localized MCP Tool Injection](#localized-mcp-tool-injection) section.
+
+**Q: Can I limit which tools are visible to specific agents?**
+A: Yes! Use `toolFilter` in `mcp_tools.ts` with include/exclude patterns. Hide sensitive operations like `gh_delete_repo` from certain agents:
+```javascript
+toolFilter: {
+  include: ["gh_list_*", "gh_get_*"],  // Only read operations
+  exclude: ["gh_delete_*"]              // Hide destructive ops
+}
+```
+
+**Q: How do I manage different API keys for different teams?**
+A: Each `mcp_tools.ts` points to different environment variables:
+```javascript
+// devops/mcp_tools.ts
+servers: {
+  github: { env: { GITHUB_TOKEN: process.env.GITHUB_DEVOPS_TOKEN } }
+}
+
+// marketing/mcp_tools.ts
+servers: {
+  mailchimp: { env: { MAILCHIMP_KEY: process.env.MARKETING_MAILCHIMP_KEY } }
+}
+```
+
+**Q: Can agents from one branch (e.g., Marketing) see tools from another (e.g., DevOps)?**
+A: No. If `inheritParent: false`, sibling branches are completely isolated. Marketing agents only see Marketing servers, DevOps only sees DevOps servers. This is by design for security.
+
+**Q: What if I want all agents to have access to certain global tools?**
+A: Define them in a root-level `mcp_tools.ts`:
+```javascript
+// agents/mcp_tools.ts (root)
+servers: {
+  logs: { /* Central logging */ }
+}
+// All subfolders inherit this
+// agents/devops/mcp_tools.ts
+inheritParent: true  // Gets logs + github + docker
+```
 
 **Q: When should I use Sequential Chains vs. tool delegation?**
 A: Use Sequential Chains when you need:

@@ -7,11 +7,13 @@ import {
   AgentRegistry,
   AgentRegistryRecord,
   AgentTool,
+  AgentMCPConfig,
   BuildRegistryOptions,
   DiscoveredAgentNode,
   SequentialWorkflowMetadata
 } from "../types.js";
 import { discoverAgentTree } from "./discover.js";
+import { MCPConfigLoader } from "../mcp/loader.js";
 
 const DEFAULT_INPUT_SCHEMA: Record<string, unknown> = {
   type: "object",
@@ -23,8 +25,9 @@ export async function buildAgentRegistry(options: BuildRegistryOptions): Promise
   const rootLogicalPath = options.rootLogicalPath ?? "root";
   const rootNode = discoverAgentTree(options.agentsRootDir);
   const records: Record<string, AgentRegistryRecord> = {};
+  const mcpLoader = new MCPConfigLoader();
 
-  await buildNodeRecord(rootNode, records, rootLogicalPath, options);
+  await buildNodeRecord(rootNode, records, rootLogicalPath, options, mcpLoader);
 
   return {
     rootPath: rootLogicalPath,
@@ -33,19 +36,35 @@ export async function buildAgentRegistry(options: BuildRegistryOptions): Promise
 }
 
 async function buildNodeRecord(
-  node: DiscoveredAgentNode & { sequentialWorkflow?: SequentialWorkflowMetadata },
+  node: DiscoveredAgentNode & { sequentialWorkflow?: SequentialWorkflowMetadata; hasMcpConfig?: boolean; mcpConfigPath?: string },
   records: Record<string, AgentRegistryRecord>,
   rootLogicalPath: string,
-  options: BuildRegistryOptions
+  options: BuildRegistryOptions,
+  mcpLoader: MCPConfigLoader
 ): Promise<void> {
   for (const child of node.children) {
-    await buildNodeRecord(child, records, rootLogicalPath, options);
+    await buildNodeRecord(child, records, rootLogicalPath, options, mcpLoader);
   }
 
   const logicalPath = toLogicalPath(node.segmentsFromRoot, rootLogicalPath);
   const routePattern = toRoutePattern(node.segmentsFromRoot);
   const config = loadLocalConfig(node.dirPath);
   const definition = await maybeLoadDefinition(node.entryFilePath, options);
+
+  // Load MCP configuration if present
+  let mcpConfig: AgentMCPConfig | undefined;
+  if (node.hasMcpConfig) {
+    try {
+      const mcpEntry = await mcpLoader.loadMCPConfig(node.dirPath, logicalPath);
+      mcpConfig = {
+        hasMcpConfig: mcpEntry.hasMcpConfig,
+        mcpConfigPath: mcpEntry.mcpConfigPath,
+        config: mcpEntry.config as unknown as Record<string, unknown>
+      };
+    } catch (error) {
+      console.warn(`Failed to load MCP config for ${logicalPath}:`, error);
+    }
+  }
 
   const tools: AgentTool[] = node.children.map((child) => {
     const childLogicalPath = toLogicalPath(child.segmentsFromRoot, rootLogicalPath);
@@ -77,7 +96,8 @@ async function buildNodeRecord(
     tools,
     childrenPaths: node.children.map((child) => toLogicalPath(child.segmentsFromRoot, rootLogicalPath)),
     definition,
-    sequentialWorkflow: node.sequentialWorkflow
+    sequentialWorkflow: node.sequentialWorkflow,
+    mcpConfig
   };
 
   if (definition) {

@@ -11,6 +11,7 @@ export * from "./middleware/index.js";
 export * from "./policy/index.js";
 export * from "./observability/index.js";
 export * from "./resilience/index.js";
+export * from "./mcp/index.js";
 export * from "./cli/types.js";
 export * from "./cli/scaffolder.js";
 export * from "./sequential.js";

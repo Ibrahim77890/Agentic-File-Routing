@@ -6,10 +6,13 @@ import { DiscoveredAgentNode, SegmentDescriptor, SequentialWorkflowMetadata } fr
 
 const ENTRY_FILES = ["index.ts", "index.js", "index.mjs", "index.cjs"];
 const LINEAR_ORCHESTRATOR_FILE = "linear.ts";
+const MCP_CONFIG_FILE = "mcp_tools.ts";
 const NUMBERED_AGENT_REGEX = /^(\d+)_(.+)\.(ts|js|mjs|cjs)$/;
 
 interface DiscoveredAgentNodeWithSequential extends DiscoveredAgentNode {
   sequentialWorkflow?: SequentialWorkflowMetadata;
+  hasMcpConfig?: boolean;
+  mcpConfigPath?: string;
 }
 
 export function discoverAgentTree(agentsRootDir: string): DiscoveredAgentNodeWithSequential {
@@ -57,6 +60,11 @@ function discoverNode(dirPath: string, segmentsFromRoot: SegmentDescriptor[]): D
     (entry) => entry.isFile() && entry.name === LINEAR_ORCHESTRATOR_FILE
   );
 
+  // Check for MCP configuration
+  const hasMcpConfig = entries.some(
+    (entry) => entry.isFile() && entry.name === MCP_CONFIG_FILE
+  );
+
   let sequentialWorkflow: SequentialWorkflowMetadata | undefined;
   if (numberedAgents.length > 0) {
     if (!hasOrchestratorFile) {
@@ -90,6 +98,11 @@ function discoverNode(dirPath: string, segmentsFromRoot: SegmentDescriptor[]): D
 
   if (sequentialWorkflow) {
     node.sequentialWorkflow = sequentialWorkflow;
+  }
+
+  if (hasMcpConfig) {
+    node.hasMcpConfig = true;
+    node.mcpConfigPath = join(dirPath, MCP_CONFIG_FILE);
   }
 
   return node;
