@@ -13,6 +13,7 @@ export * from "./observability/index.js";
 export * from "./resilience/index.js";
 export * from "./cli/types.js";
 export * from "./cli/scaffolder.js";
+export * from "./sequential.js";
 export { demoMilestone2 } from "./demo.js";
 export { demoMilestone3 } from "./demo3.js";
 export { demoMilestone4And5 } from "./demo4and5.js";

@@ -26,6 +26,7 @@ import {
   createToolCall,
   ToolResultMessage
 } from "./messages.js";
+import { executeSequentialWorkflow } from "../sequential.js";
 
 export interface ExecutionOptions {
   maxDepth?: number;
@@ -175,6 +176,33 @@ export class AfrExecutor {
         throw new RoutingError(
           `Agent path not found in registry: ${context.currentPath}. Available paths: ${Object.keys(this.registry.records).join(", ")}.`
         );
+      }
+
+      // Check for sequential workflow execution
+      if (record.sequentialWorkflow?.hasSequentialAgents) {
+        const sequentialResult = await executeSequentialWorkflow(
+          record.sequentialWorkflow,
+          record.dirPath,
+          context.globalContext?.userInput || context.globalContext || "",
+          {
+            sessionId: context.sessionId || "session-" + Date.now(),
+            traceId: "trace-" + Math.random().toString(36),
+            depth: context.depth,
+            agentPath: context.currentPath
+          }
+        );
+
+        if (sequentialResult.success && sequentialResult.output) {
+          // Add the output as a message
+          frame.messages.push(
+            createAssistantMessage(`Sequential workflow executed: ${JSON.stringify(sequentialResult.output)}`)
+          );
+          return;
+        }
+
+        if (!sequentialResult.success) {
+          throw sequentialResult.error || new ExecutionError(`Sequential workflow failed at ${context.currentPath}`);
+        }
       }
 
       const mergedContext = mergeContextWithLocalConfig(context, record.config);

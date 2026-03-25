@@ -47,6 +47,7 @@ export interface AgentRegistryRecord {
   tools: AgentTool[];
   childrenPaths: string[];
   definition?: AgentDefinition;
+  sequentialWorkflow?: SequentialWorkflowMetadata;
 }
 
 export interface AgentRegistry {
@@ -59,4 +60,39 @@ export interface BuildRegistryOptions {
   rootLogicalPath?: string;
   loadDefinitions?: boolean;
   strictDefinitionLoading?: boolean;
+}
+
+export interface SequentialAgentObject {
+  name: string;
+  index: number;
+  filePath: string;
+  definition?: AgentDefinition;
+  execute: (params: { input: unknown; originalTask: unknown }) => Promise<{
+    status: "success" | "error";
+    output?: unknown;
+    message?: string;
+  }>;
+}
+
+export interface LinearContext {
+  initialInput: unknown;
+  sessionId: string;
+  traceId: string;
+  depth: number;
+  agentPath: string;
+}
+
+export interface SequentialWorkflowMetadata {
+  hasSequentialAgents: boolean;
+  numberedAgents: Array<{
+    index: number;
+    fileName: string;
+    filePath: string;
+  }>;
+  hasOrchestratorFile: boolean;
+  orchestratorPath?: string;
+}
+
+export interface DiscoveredAgentNodeWithSequential extends DiscoveredAgentNode {
+  sequentialWorkflow?: SequentialWorkflowMetadata;
 }

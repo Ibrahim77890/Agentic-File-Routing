@@ -13,6 +13,7 @@ A powerful, file-system-routed hierarchical agent orchestration framework for Ja
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
+- [Sequential Chain Orchestration](#sequential-chain-orchestration)
 - [Usage Guide](#usage-guide)
 - [API Reference](#api-reference)
 - [Examples](#examples)
@@ -62,6 +63,7 @@ root/
 ✅ **File-Based Routing** — Folder structure defines agent topology (no JSON configs)
 ✅ **Hierarchical Tool Exposure** — Each agent sees only its direct children
 ✅ **Recursive Composition** — Unlimited nesting; all agents follow same interface
+✅ **Sequential Chain Orchestration** — Explicit numbered agent workflows (0_step.ts → 1_step.ts → linear.ts)
 ✅ **Provider Agnostic** — Built-in adapters for OpenAI and Anthropic
 ✅ **Zero External Dependencies** — HTTP fetch-based, no SDK bloat
 ✅ **Context Inheritance** — Automatic parent-to-child parameter propagation
@@ -183,6 +185,20 @@ console.log("Result:", result.messages);
 console.log("Call stack:", result.context.callStack);
 ```
 
+### Pro Tip: Sequential Chains
+
+For explicit, visible workflows, use **Sequential Chain Orchestration** with numbered agents:
+
+```text
+agents/competitor-analysis/
+├── 0_scraper.ts        # Step 1: Extract data
+├── 1_analyzer.ts       # Step 2: Analyze patterns
+├── 2_reporter.ts       # Step 3: Generate report
+└── linear.ts           # Control data flow
+```
+
+The executor automatically detects and orchestrates these workflows. See [Sequential Chain Orchestration](#sequential-chain-orchestration) for details.
+
 ## Architecture
 
 ### System Layers
@@ -282,6 +298,239 @@ interface SessionFrame {
 }
 ```
 
+## Sequential Chain Orchestration
+
+AFR includes a powerful **Sequential Chain Orchestration** feature for building explicit, visible data pipelines where multiple agents execute in a defined sequence with data flowing from one step to the next.
+
+### Why Sequential Chains?
+
+Instead of black-box LLM looping or recursive tool calls, sequential chains give you:
+- **Explicit Workflows** — File system shows exact execution order (0_step → 1_step → 2_step)
+- **Developer Control** — Write `linear.ts` orchestrator to manage data flow between steps
+- **Custom Logic Hooks** — Inject business logic (API calls, database updates) between steps
+- **Type Safety** — Full TypeScript support with interfaces
+
+### How It Works
+
+**File Structure:**
+```text
+agents/workflow-name/
+├── index.ts                    # Entry point
+├── 0_scraper.ts                # First step
+├── 1_analyzer.ts               # Second step
+├── 2_reporter.ts               # Third step
+└── linear.ts                   # Orchestration logic
+```
+
+**Automatic Detection & Validation:**
+1. Library discovers numbered agents (0_*.ts, 1_*.ts, etc.)
+2. Auto-sorts by numeric prefix
+3. Validates that `linear.ts` exists (throws `MissingOrchestratorError` if missing)
+4. Passes sorted agents to orchestrator function
+
+**Data Flow:**
+```
+Input
+  ↓
+[0_scraper.ts] → Extract features
+  ↓ (output becomes input)
+[1_analyzer.ts] → Analyze data
+  ↓ (output becomes input)
+[2_reporter.ts] → Generate report
+  ↓
+[linear.ts] → Orchestrator returns final result
+```
+
+### Quick Example: Competitor Analysis
+
+```typescript
+// agents/competitor-analysis/index.ts
+export default {
+  name: "Competitor Analysis Orchestrator",
+  description: "Analyzes competitors and generates counter-strategies",
+  systemPrompt: "Coordinate multi-step competitive analysis...",
+};
+
+// agents/competitor-analysis/0_scraper.ts
+export async function execute(params: { input: unknown; originalTask: unknown }) {
+  return {
+    status: "success",
+    output: { productName: "...", features: [...], pricingModel: "..." }
+  };
+}
+
+// agents/competitor-analysis/1_price_analyst.ts
+export async function execute(params: { input: unknown; originalTask: unknown }) {
+  const productData = params.input;
+  return {
+    status: "success",
+    output: { pricingAnalysis: "...", opportunities: [...] }
+  };
+}
+
+// agents/competitor-analysis/2_strategist.ts
+export async function execute(params: { input: unknown; originalTask: unknown }) {
+  const analysisData = params.input;
+  return {
+    status: "success",
+    output: { strategy: "...", recommendations: [...] }
+  };
+}
+
+// agents/competitor-analysis/linear.ts
+import { LinearContext, SequentialAgentObject } from 'agentic-file-routing';
+
+export async function run(context: LinearContext, agents: SequentialAgentObject[]) {
+  let pipelineData = context.initialInput;
+
+  for (const agent of agents) {
+    const result = await agent.execute({
+      input: pipelineData,
+      originalTask: context.initialInput
+    });
+
+    if (result.status === 'error') {
+      throw new Error(`Chain failed at ${agent.name}: ${result.message}`);
+    }
+
+    // Custom logic between steps
+    if (agent.index === 0) {
+      console.log("✅ Product research complete, proceeding to analysis...");
+    }
+
+    pipelineData = result.output;
+  }
+
+  return pipelineData;
+}
+```
+
+### Advanced Features: Custom Logic Between Steps
+
+You have full control in `linear.ts` to inject custom logic between agent executions:
+
+```typescript
+export async function run(context: LinearContext, agents: SequentialAgentObject[]) {
+  let pipelineData = context.initialInput;
+
+  for (const agent of agents) {
+    const result = await agent.execute({
+      input: pipelineData,
+      originalTask: context.initialInput
+    });
+
+    if (result.status === 'error') throw new Error(`Failed at ${agent.name}`);
+
+    pipelineData = result.output;
+
+    // CUSTOM LOGIC BETWEEN STEPS
+    if (agent.index === 0) {
+      // Validate data from step 1
+      if (!pipelineData.productName) {
+        throw new Error('Missing product name');
+      }
+      
+      // Example: Call external API
+      // const enrichedData = await fetchFromDatabase(pipelineData);
+      // pipelineData = enrichedData;
+    }
+
+    if (agent.index === 1) {
+      // Transform or enrich results
+      pipelineData = {
+        ...pipelineData,
+        timestamp: new Date().toISOString(),
+        processedBy: agent.name
+      };
+      
+      // Example: Save to database
+      // await saveIntermediateResults('step1_output', pipelineData);
+    }
+  }
+
+  return pipelineData;
+}
+```
+
+### Linear.ts Orchestrator
+
+Each sequential workflow requires a manually-written `linear.ts` file:
+
+**Required Signature:**
+```typescript
+export async function run(
+  context: LinearContext,
+  agents: SequentialAgentObject[]
+): Promise<any>
+```
+
+**LinearContext:**
+```typescript
+interface LinearContext {
+  initialInput: unknown;    // Original input to workflow
+  sessionId: string;        // Session identifier
+  traceId: string;          // Trace identifier
+  depth: number;            // Execution depth
+  agentPath: string;        // Path to orchestrator
+}
+```
+
+**SequentialAgentObject:**
+```typescript
+interface SequentialAgentObject {
+  name: string;             // Agent name
+  index: number;            // Numeric prefix (0, 1, 2...)
+  filePath: string;         // Path to agent file
+  definition?: AgentDefinition;
+  execute: (params: {
+    input: unknown;
+    originalTask: unknown;
+  }) => Promise<{
+    status: "success" | "error";
+    output?: unknown;
+    message?: string;
+  }>;
+}
+```
+
+### Automatic Execution via Executor
+
+When you run an agent with sequential workflow metadata, `AfrExecutor` automatically:
+1. Detects the sequential workflow
+2. Loads and sorts the numbered agents
+3. Executes the `linear.ts` orchestrator
+4. Returns the final result
+
+```typescript
+const executor = new AfrExecutor(registry);
+const result = await executor.execute('root.competitor-analysis', 'Company X');
+// Automatically detects and executes the sequential workflow
+```
+
+### Error Handling
+
+**MissingOrchestratorError** — Thrown when:
+- Directory contains numbered agents (0_*.ts, 1_*.ts, etc.)
+- But `linear.ts` file is not found
+
+**Fix:** Create a `linear.ts` file in the directory that exports a `run` function
+
+### Best Practices
+
+1. **Use Meaningful Numbers**: Start from 0, use single digits (0-9)
+2. **Clear Naming**: Use descriptive names after the number (e.g., `0_scraper.ts`, `1_analyzer.ts`)
+3. **Error Handling**: Always check `result.status` in linear.ts
+4. **Schema Validation**: Define input/output schemas in agent definitions
+5. **Logging**: Add meaningful logs in linear.ts for debugging
+6. **Document Contracts**: Explain input/output expectations in comments
+
+### See Full Documentation
+
+For complete sequential chain orchestration documentation, examples, and API reference, see:
+- [SEQUENTIAL_CHAIN_ORCHESTRATION.md](./SEQUENTIAL_CHAIN_ORCHESTRATION.md) — Full feature guide
+- [SEQUENTIAL_IMPLEMENTATION_SUMMARY.md](./SEQUENTIAL_IMPLEMENTATION_SUMMARY.md) — Architecture details
+- [src/demo-sequential.ts](./src/demo-sequential.ts) — Working examples
+
 ## Usage Guide
 
 ### Basic Execution
@@ -352,6 +601,70 @@ Optional `config.json` in any folder overrides inherited settings.
   "temperature": 0.2,
   "timeoutMs": 60000
 }
+```
+
+### Sequential Chain Workflows
+
+Create explicit data pipelines with numbered agents and a `linear.ts` orchestrator:
+
+```typescript
+// 1. Define numbered agents that execute in sequence
+// agents/data-pipeline/0_extractor.ts
+export async function execute(params: { input: unknown; originalTask: unknown }) {
+  return {
+    status: "success",
+    output: { extracted: "data from source" }
+  };
+}
+
+// agents/data-pipeline/1_transformer.ts
+export async function execute(params: { input: unknown; originalTask: unknown }) {
+  const { extracted } = params.input as any;
+  return {
+    status: "success",
+    output: { transformed: extracted.toUpperCase() }
+  };
+}
+
+// agents/data-pipeline/2_loader.ts
+export async function execute(params: { input: unknown; originalTask: unknown }) {
+  const { transformed } = params.input as any;
+  return {
+    status: "success",
+    output: { loaded: true, data: transformed }
+  };
+}
+
+// 2. Create the orchestrator that controls data flow
+// agents/data-pipeline/linear.ts
+import { LinearContext, SequentialAgentObject } from 'agentic-file-routing';
+
+export async function run(context: LinearContext, agents: SequentialAgentObject[]) {
+  let data = context.initialInput;
+
+  for (const agent of agents) {
+    const result = await agent.execute({
+      input: data,
+      originalTask: context.initialInput
+    });
+
+    if (result.status === 'error') {
+      throw new Error(`Pipeline failed at step ${agent.index}`);
+    }
+
+    data = result.output;
+  }
+
+  return { pipelineComplete: true, finalData: data };
+}
+
+// 3. Execute the sequential workflow
+const executor = new AfrExecutor(registry);
+const result = await executor.execute(
+  'root.data-pipeline',
+  { source: 'http://...' }
+);
+// Automatically detects and executes the sequential chain
 ```
 
 ### Dynamic Segments (Coming in v2)
@@ -487,7 +800,101 @@ export default {
 }
 ```
 
-### Example 3: With Real Provider
+### Example 3: Sequential Chain - Data Processing Pipeline
+
+Create an explicit workflow where data flows through multiple processing steps.
+
+```typescript
+// Structure:
+// agents/feedback-pipeline/
+// ├── 0_cleaner.ts      - Normalize and clean data
+// ├── 1_classifier.ts   - Categorize feedback
+// ├── 2_summarizer.ts   - Generate summaries
+// └── linear.ts         - Orchestrate the pipeline
+
+// agents/feedback-pipeline/0_cleaner.ts
+export const definition = {
+  name: "Data Cleaner",
+  description: "Normalizes and cleans input data",
+  systemPrompt: "Clean and normalize the data..."
+};
+
+export async function execute(params: { input: unknown; originalTask: unknown }) {
+  const { feedbackList } = params.input as any;
+  return {
+    status: "success",
+    output: { cleaned: feedbackList.map(f => f.trim()) }
+  };
+}
+
+// agents/feedback-pipeline/1_classifier.ts
+export async function execute(params: { input: unknown; originalTask: unknown }) {
+  const { cleaned } = params.input as any;
+  return {
+    status: "success",
+    output: { 
+      classified: cleaned.map(f => ({
+        text: f,
+        category: f.includes("bug") ? "bug" : "feature"
+      }))
+    }
+  };
+}
+
+// agents/feedback-pipeline/2_summarizer.ts
+export async function execute(params: { input: unknown; originalTask: unknown }) {
+  const { classified } = params.input as any;
+  return {
+    status: "success",
+    output: { 
+      summary: {
+        bugs: classified.filter((c: any) => c.category === "bug").length,
+        features: classified.filter((c: any) => c.category === "feature").length,
+        items: classified
+      }
+    }
+  };
+}
+
+// agents/feedback-pipeline/linear.ts
+import { LinearContext, SequentialAgentObject } from 'agentic-file-routing';
+
+export async function run(context: LinearContext, agents: SequentialAgentObject[]) {
+  console.log(`Processing feedback pipeline: ${agents.length} steps`);
+  let data = context.initialInput;
+
+  for (const agent of agents) {
+    const startTime = Date.now();
+    const result = await agent.execute({
+      input: data,
+      originalTask: context.initialInput
+    });
+
+    if (result.status === 'error') {
+      throw new Error(`Pipeline failed at ${agent.name}: ${result.message}`);
+    }
+
+    const duration = Date.now() - startTime;
+    console.log(`✅ ${agent.name} completed in ${duration}ms`);
+    data = result.output;
+  }
+
+  return {
+    processedAt: new Date().toISOString(),
+    pipelineResult: data,
+    agents: agents.map(a => ({ name: a.name, index: a.index }))
+  };
+}
+
+// Execute the pipeline
+const executor = new AfrExecutor(registry);
+const result = await executor.execute(
+  'root.feedback-pipeline',
+  { feedbackList: ["Bug: login fails", "Feature: dark mode", "Bug: slow load"] }
+);
+```
+
+### Example 4: With Real Provider
 
 ```typescript
 import { buildAgentRegistry, executeAgent } from "agentic-file-routing";
@@ -539,6 +946,7 @@ result.messages.forEach((msg, i) => {
 │   ├── types.ts              # Core type definitions
 │   ├── errors.ts             # Error classes
 │   ├── path-utils.ts         # Route parsing
+│   ├── sequential.ts         # Sequential chain orchestration
 │   ├── loader/
 │   │   ├── discover.ts       # Directory crawler
 │   │   ├── registry.ts       # Registry builder
@@ -556,10 +964,16 @@ result.messages.forEach((msg, i) => {
 │   │   └── index.ts          # Provider exports
 │   ├── demo.ts               # Milestone 2 demo
 │   ├── demo3.ts              # Milestone 3 demo
+│   ├── demo-sequential.ts    # Sequential chain demos
 │   └── index.ts              # Package entry
 ├── examples/
-│   └── agents/               # Example agent tree
+│   └── agents/               # Example agent trees
+│       ├── devops/
+│       ├── marketing/
+│       └── competitor-analysis/  # Sequential workflow example
 ├── dist/                     # Compiled output (generated)
+├── SEQUENTIAL_CHAIN_ORCHESTRATION.md     # Sequential feature docs
+├── SEQUENTIAL_IMPLEMENTATION_SUMMARY.md  # Implementation details
 ├── package.json
 ├── tsconfig.json
 └── README.md
@@ -595,18 +1009,20 @@ npm test
 - **Milestone 1**: Core loader and registry crawler
 - **Milestone 2**: Recursive execution engine
 - **Milestone 3**: Provider adapters (OpenAI, Anthropic)
+- **Milestone 4-5**: Context inheritance, policy layer, and middleware
+- **Milestone 6**: Sequential Chain Orchestration (numbered agents + linear.ts orchestrators)
 
 ### 🔄 In Progress
 
-- **Milestone 4**: Context inheritance and policy layer
-- **Milestone 5**: Middleware and observability
-- **Milestone 6**: CLI and developer experience
+- **CLI and Developer Experience Tools**
+- **Agent Template Scaffolding**
 
 ### 📋 Planned
 
 - **Milestone 7**: Production hardening and npm publication
 - **v2.0**: Dynamic segment routing ([topic], [...path])
 - **v2.0**: Advanced middleware ecosystem
+- **v2.0**: Parallel execution support for sequential chains
 - **v2.5**: Distributed execution support
 - **v3.0**: UI dashboard for agent monitoring
 
@@ -662,6 +1078,27 @@ A: Not yet. v2 will add browser-compatible execution.
 
 **Q: How do I debug agent execution?**
 A: Every execution returns a `callStack` and `traceId`. Use these to track routing.
+
+**Q: What are Sequential Chain Orchestrations?**
+A: Explicit workflows where numbered agents (0_step.ts, 1_step.ts) execute sequentially with data piping between steps. Control data flow using a `linear.ts` orchestrator file. See [SEQUENTIAL_CHAIN_ORCHESTRATION.md](./SEQUENTIAL_CHAIN_ORCHESTRATION.md) for details.
+
+**Q: When should I use Sequential Chains vs. tool delegation?**
+A: Use Sequential Chains when you need:
+- Explicit, visible workflows (not black-box LLM recursion)
+- Custom logic between steps (API calls, database updates)
+- Guaranteed execution order
+- Simpler data passing without LLM tool calling overhead
+
+Use tool delegation for unstructured, exploratory agent interactions.
+
+**Q: What happens if a step in my sequential chain fails?**
+A: The `linear.ts` orchestrator controls error handling. You can either throw (stop the chain) or handle gracefully and continue. Full error context is available.
+
+**Q: Can I have parallel steps in a sequential chain?**
+A: Not yet. v2 will add support for conditional branches and parallel execution. For now, implement manual parallelization in `linear.ts` using Promise.all() if needed.
+
+**Q: Do I need to define schemas for sequential agents?**
+A: Optional but recommended. Define `inputSchema` and `outputSchema` in agent definitions for documentation and validation.
 
 ---
 

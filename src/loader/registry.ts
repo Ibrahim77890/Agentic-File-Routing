@@ -8,7 +8,8 @@ import {
   AgentRegistryRecord,
   AgentTool,
   BuildRegistryOptions,
-  DiscoveredAgentNode
+  DiscoveredAgentNode,
+  SequentialWorkflowMetadata
 } from "../types.js";
 import { discoverAgentTree } from "./discover.js";
 
@@ -32,7 +33,7 @@ export async function buildAgentRegistry(options: BuildRegistryOptions): Promise
 }
 
 async function buildNodeRecord(
-  node: DiscoveredAgentNode,
+  node: DiscoveredAgentNode & { sequentialWorkflow?: SequentialWorkflowMetadata },
   records: Record<string, AgentRegistryRecord>,
   rootLogicalPath: string,
   options: BuildRegistryOptions
@@ -75,7 +76,8 @@ async function buildNodeRecord(
     config,
     tools,
     childrenPaths: node.children.map((child) => toLogicalPath(child.segmentsFromRoot, rootLogicalPath)),
-    definition
+    definition,
+    sequentialWorkflow: node.sequentialWorkflow
   };
 
   if (definition) {

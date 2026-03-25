@@ -49,3 +49,10 @@ export class DiscoveryError extends AfrError {
     this.name = "DiscoveryError";
   }
 }
+
+export class MissingOrchestratorError extends AfrError {
+  constructor(message: string) {
+    super("MISSING_ORCHESTRATOR_ERROR", message);
+    this.name = "MissingOrchestratorError";
+  }
+}
