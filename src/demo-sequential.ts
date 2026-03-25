@@ -13,7 +13,7 @@ import {
   SequentialAgentObject,
   executeSequentialWorkflow,
   loadSequentialAgents
-} from "./src/index.js";
+} from "./index.js";
 import path from "path";
 
 /**
@@ -44,7 +44,7 @@ export async function demoAutoDetection() {
     console.log("\n✅ Sequential Workflow Detected!");
     console.log(`Directory: ${competitorAnalysisRecord.dirPath}`);
     console.log(
-      `Numbered Agents: ${competitorAnalysisRecord.sequentialWorkflow.numberedAgents.map((a) => a.fileName).join(", ")}`
+      `Numbered Agents: ${competitorAnalysisRecord.sequentialWorkflow.numberedAgents.map((a: any) => a.fileName).join(", ")}`
     );
     console.log(
       `Orchestrator: ${competitorAnalysisRecord.sequentialWorkflow.orchestratorPath}`
@@ -114,7 +114,7 @@ export async function demoManualExecution() {
     if (result.success) {
       console.log("\n✅ Workflow Executed Successfully!");
       console.log(`Duration: ${result.durationMs}ms`);
-      console.log(`Executed Agents: ${result.executedAgents.map((a) => a.name).join(" → ")}`);
+      console.log(`Executed Agents: ${result.executedAgents.map((a: any) => a.name).join(" → ")}`);
       console.log(`\nFinal Output (first 500 chars):`);
       console.log(JSON.stringify(result.output).substring(0, 500));
     } else {

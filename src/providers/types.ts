@@ -1,7 +1,7 @@
 import type { Message, ToolCall } from "../executor/messages.js";
 import type { AgentRegistryRecord } from "../types.js";
 
-export type ProviderName = "openai" | "anthropic";
+export type ProviderName = "openai" | "anthropic" | "openrouter";
 
 export interface ModelConfig {
   provider: ProviderName;
