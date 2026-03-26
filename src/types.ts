@@ -1,3 +1,5 @@
+import type { ProviderName } from "./providers/types.js";
+
 export interface AgentTool {
   name: string;
   description: string;
@@ -14,6 +16,45 @@ export interface AgentMCPConfig {
   hasMcpConfig: boolean;
   mcpConfigPath?: string;
   config?: Record<string, unknown>; // MCPToolsConfig from mcp/types
+}
+
+export interface AgentLayoutConfig {
+  hasLayout: boolean;
+  layoutPath?: string;
+}
+
+export interface AgentMiddlewareConfig {
+  hasMiddleware: boolean;
+  middlewarePath?: string;
+}
+
+export interface AgentInterruptConfig {
+  hasInterrupt: boolean;
+  interruptPath?: string;
+}
+
+export interface ParallelWorkflowMetadata {
+  hasParallelOrchestrator: boolean;
+  orchestratorPath?: string;
+  hasDebateFolder: boolean;
+  debatePath?: string;
+  debateEntryPath?: string;
+}
+
+export interface ProviderFallbackChain {
+  provider: ProviderName;
+  modelId?: string;
+  apiKeyEnv?: string;
+}
+
+export interface ProviderFallbackConfig {
+  providers: ProviderFallbackChain[];
+}
+
+export interface AgentProviderFallback {
+  hasFallbackConfig: boolean;
+  fallbackPath?: string;
+  config?: ProviderFallbackConfig;
 }
 
 export interface AgentDefinition {
@@ -58,7 +99,12 @@ export interface AgentRegistryRecord {
   childrenPaths: string[];
   definition?: AgentDefinition;
   sequentialWorkflow?: SequentialWorkflowMetadata;
+  parallelWorkflow?: ParallelWorkflowMetadata;
   mcpConfig?: AgentMCPConfig;
+  layoutConfig?: AgentLayoutConfig;
+  middlewareConfig?: AgentMiddlewareConfig;
+  interruptConfig?: AgentInterruptConfig;
+  providerFallback?: AgentProviderFallback;
 }
 
 export interface AgentRegistry {
@@ -79,7 +125,7 @@ export interface SequentialAgentObject {
   filePath: string;
   definition?: AgentDefinition;
   execute: (params: { input: unknown; originalTask: unknown }) => Promise<{
-    status: "success" | "error";
+    status: "success" | "error" | "paused";
     output?: unknown;
     message?: string;
   }>;
@@ -87,6 +133,9 @@ export interface SequentialAgentObject {
 
 export interface LinearContext {
   initialInput: unknown;
+  originalInput?: unknown;
+  approvalData?: unknown;
+  resumedFromSessionId?: string;
   sessionId: string;
   traceId: string;
   depth: number;
@@ -102,8 +151,34 @@ export interface SequentialWorkflowMetadata {
   }>;
   hasOrchestratorFile: boolean;
   orchestratorPath?: string;
+  hasInterruptFile?: boolean;
+  interruptPath?: string;
 }
 
 export interface DiscoveredAgentNodeWithSequential extends DiscoveredAgentNode {
   sequentialWorkflow?: SequentialWorkflowMetadata;
+}
+
+export interface ExecutionSnapshot {
+  id: string;
+  sessionId: string;
+  traceId: string;
+  agentPath: string;
+  status: "checkpoint" | "paused" | "failed";
+  createdAt: number;
+  context: Record<string, unknown>;
+  userInput?: string;
+  globalContext?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SnapshotStore {
+  save(snapshot: ExecutionSnapshot): Promise<void>;
+  getBySessionId(sessionId: string): Promise<ExecutionSnapshot | undefined>;
+  getById(id: string): Promise<ExecutionSnapshot | undefined>;
+  list(): Promise<ExecutionSnapshot[]>;
+}
+
+export interface LayoutModule {
+  systemPromptPrefix: string;
 }

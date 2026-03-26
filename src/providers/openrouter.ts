@@ -13,7 +13,7 @@ export class OpenRouterProvider implements ILlmProvider {
     this.apiKey = config.apiKey || process.env.OPENROUTER_API_KEY || "";
     this.modelId = config.modelId || "openai/gpt-4-turbo";
     this.config = config;
-    this.baseUrl = "https://openrouter.io/api/v1";
+    this.baseUrl = process.env.OPENROUTER_API_URL || "https://openrouter.ai/api/v1";
 
     if (!this.apiKey) {
       throw new Error(

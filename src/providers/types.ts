@@ -1,5 +1,4 @@
 import type { Message, ToolCall } from "../executor/messages.js";
-import type { AgentRegistryRecord } from "../types.js";
 
 export type ProviderName = "openai" | "anthropic" | "openrouter";
 

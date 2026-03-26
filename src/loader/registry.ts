@@ -1,5 +1,4 @@
 import { existsSync, readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
 import { ExecutionError, SchemaError } from "../errors.js";
 import { toLogicalPath, toRoutePattern, toToolName } from "../path-utils.js";
 import {
@@ -8,12 +7,18 @@ import {
   AgentRegistryRecord,
   AgentTool,
   AgentMCPConfig,
+  AgentLayoutConfig,
+  AgentMiddlewareConfig,
+  AgentInterruptConfig,
+  AgentProviderFallback,
   BuildRegistryOptions,
   DiscoveredAgentNode,
-  SequentialWorkflowMetadata
+  SequentialWorkflowMetadata,
+  ParallelWorkflowMetadata
 } from "../types.js";
 import { discoverAgentTree } from "./discover.js";
 import { MCPConfigLoader } from "../mcp/loader.js";
+import { importRuntimeModule } from "./module-resolver.js";
 
 const DEFAULT_INPUT_SCHEMA: Record<string, unknown> = {
   type: "object",
@@ -36,7 +41,20 @@ export async function buildAgentRegistry(options: BuildRegistryOptions): Promise
 }
 
 async function buildNodeRecord(
-  node: DiscoveredAgentNode & { sequentialWorkflow?: SequentialWorkflowMetadata; hasMcpConfig?: boolean; mcpConfigPath?: string },
+  node: DiscoveredAgentNode & {
+    sequentialWorkflow?: SequentialWorkflowMetadata;
+    parallelWorkflow?: ParallelWorkflowMetadata;
+    hasMcpConfig?: boolean;
+    mcpConfigPath?: string;
+    hasLayout?: boolean;
+    layoutPath?: string;
+    hasMiddleware?: boolean;
+    middlewarePath?: string;
+    hasInterrupt?: boolean;
+    interruptPath?: string;
+    hasFallback?: boolean;
+    fallbackPath?: string;
+  },
   records: Record<string, AgentRegistryRecord>,
   rootLogicalPath: string,
   options: BuildRegistryOptions,
@@ -65,6 +83,34 @@ async function buildNodeRecord(
       console.warn(`Failed to load MCP config for ${logicalPath}:`, error);
     }
   }
+
+  const layoutConfig: AgentLayoutConfig | undefined = node.hasLayout
+    ? {
+        hasLayout: true,
+        layoutPath: node.layoutPath
+      }
+    : undefined;
+
+  const middlewareConfig: AgentMiddlewareConfig | undefined = node.hasMiddleware
+    ? {
+        hasMiddleware: true,
+        middlewarePath: node.middlewarePath
+      }
+    : undefined;
+
+  const interruptConfig: AgentInterruptConfig | undefined = node.hasInterrupt
+    ? {
+        hasInterrupt: true,
+        interruptPath: node.interruptPath
+      }
+    : undefined;
+
+  const providerFallback: AgentProviderFallback | undefined = node.hasFallback
+    ? {
+        hasFallbackConfig: true,
+        fallbackPath: node.fallbackPath
+      }
+    : undefined;
 
   const tools: AgentTool[] = node.children.map((child) => {
     const childLogicalPath = toLogicalPath(child.segmentsFromRoot, rootLogicalPath);
@@ -97,7 +143,12 @@ async function buildNodeRecord(
     childrenPaths: node.children.map((child) => toLogicalPath(child.segmentsFromRoot, rootLogicalPath)),
     definition,
     sequentialWorkflow: node.sequentialWorkflow,
-    mcpConfig
+    parallelWorkflow: node.parallelWorkflow,
+    mcpConfig,
+    layoutConfig,
+    middlewareConfig,
+    interruptConfig,
+    providerFallback
   };
 
   if (definition) {
@@ -131,8 +182,7 @@ async function maybeLoadDefinition(
   }
 
   try {
-    const moduleUrl = pathToFileURL(entryFilePath).href;
-    const mod = (await import(moduleUrl)) as Record<string, unknown>;
+    const mod = await importRuntimeModule(entryFilePath);
     const candidate = (mod.default ?? mod.agent ?? mod.definition) as AgentDefinition | undefined;
 
     if (!candidate) {

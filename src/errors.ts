@@ -56,3 +56,29 @@ export class MissingOrchestratorError extends AfrError {
     this.name = "MissingOrchestratorError";
   }
 }
+
+export class InterruptPauseError extends AfrError {
+  public readonly sessionId: string;
+  public readonly snapshotId: string;
+
+  constructor(message: string, sessionId: string, snapshotId: string) {
+    super("INTERRUPT_PAUSE", message);
+    this.name = "InterruptPauseError";
+    this.sessionId = sessionId;
+    this.snapshotId = snapshotId;
+  }
+}
+
+export class SnapshotNotFoundError extends AfrError {
+  constructor(message: string) {
+    super("SNAPSHOT_NOT_FOUND", message);
+    this.name = "SnapshotNotFoundError";
+  }
+}
+
+export class ProviderFallbackError extends AfrError {
+  constructor(message: string) {
+    super("PROVIDER_FALLBACK_ERROR", message);
+    this.name = "ProviderFallbackError";
+  }
+}

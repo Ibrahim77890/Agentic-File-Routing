@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "create-afr-agent": "./bin/create-afr-agent.mjs"
+    "create-afr-agent": "./bin/create-afr-agent.mjs",
+    "afr": "./bin/afr.mjs"
   },
   "files": [
     "dist",
@@ -15,6 +16,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "if exist dist rmdir /s /q dist",
+    "dev": "node dist/cli/afr-dev.js",
     "test": "node --test dist/tests/**/*.test.js",
     "test:watch": "tsc -p tsconfig.json --watch"
   },
@@ -28,6 +30,7 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.15.3",
+    "dotenv": "^16.4.5",
     "typescript": "^5.8.2"
   }
 }

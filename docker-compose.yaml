@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  obsidian-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-obsidian
+    container_name: afr-obsidian-mcp-server
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+      - VAULT_PATH=/data/vault
+      - MCP_SERVER_HOST=0.0.0.0
+      - MCP_SERVER_PORT=3000
+    volumes:
+      - obsidian-vault-data:/data/vault
+      - ./vault-config:/data/config:ro
+    networks:
+      - afr-network
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  obsidian-vault-data:
+    driver: local
+
+networks:
+  afr-network:
+    driver: bridge

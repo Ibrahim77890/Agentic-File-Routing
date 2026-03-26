@@ -1,6 +1,6 @@
 # AFR (Agentic File-Routing)
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-MVP-yellow)
 
@@ -15,6 +15,11 @@ A powerful, file-system-routed hierarchical agent orchestration framework for Ja
 - [Architecture](#architecture)
 - [Sequential Chain Orchestration](#sequential-chain-orchestration)
 - [Localized MCP Tool Injection](#localized-mcp-tool-injection)
+- [Guardrail Middleware Pattern](#guardrail-middleware-pattern)
+- [Shared Directory Context with layoutts](#shared-directory-context-with-layoutts)
+- [Human-in-the-Loop Breakpoint with interruptts](#human-in-the-loop-breakpoint-with-interruptts)
+- [Parallel Ensemble Routing with parallelts](#parallel-ensemble-routing-with-parallelts)
+- [NPM Readiness Enhancements](#npm-readiness-enhancements)
 - [Usage Guide](#usage-guide)
 - [API Reference](#api-reference)
 - [Examples](#examples)
@@ -66,11 +71,18 @@ root/
 ✅ **Recursive Composition** — Unlimited nesting; all agents follow same interface
 ✅ **Sequential Chain Orchestration** — Explicit numbered agent workflows (0_step.ts → 1_step.ts → linear.ts)
 ✅ **Localized MCP Tool Injection** — Folder-scoped Model Context Protocol servers (mcp_tools.ts per folder)
-✅ **Provider Agnostic** — Built-in adapters for OpenAI and Anthropic
+✅ **Guardrail Middleware Pattern** — Branch-level middleware.ts hooks for input/output controls
+✅ **Shared Directory Context** — layout.ts prompt prefixes inherited root → leaf
+✅ **Human-in-the-Loop Interrupts** — interrupt.ts breakpoints + resumeAgent(sessionId, approvalData)
+✅ **Parallel Ensemble Routing** — parallel.ts jury over concurrent child-agent outputs
+✅ **Provider Fallback Chains** — fallback.ts for automatic provider/model failover
+✅ **Provider Agnostic** — Built-in adapters for OpenAI, Anthropic, and OpenRouter
 ✅ **Zero External Dependencies** — HTTP fetch-based, no SDK bloat
 ✅ **Context Inheritance** — Automatic parent-to-child parameter propagation
 ✅ **Session Tracking** — Built-in traceId, sessionId, and call stacks
 ✅ **Graceful Fallback** — Simulation mode when LLM provider unavailable
+✅ **State Snapshots** — Save/restore failed or paused runs from checkpoints
+✅ **AFR Dev Server + HMR** — afr dev graph UI with live registry rebuilds
 ✅ **TypeScript First** — Full type safety and IntelliSense support
 ✅ **Next.js-Like Routing** — Static and dynamic folder segments
 
@@ -200,6 +212,33 @@ agents/competitor-analysis/
 ```
 
 The executor automatically detects and orchestrates these workflows. See [Sequential Chain Orchestration](#sequential-chain-orchestration) for details.
+
+### Pro Tip: Full Branch Pattern
+
+Use folder-level control files to enforce safety and consistency:
+
+```text
+src/agents/
+├─ layout.ts                # Global prompt prefix (company rules)
+├─ middleware.ts            # Global guardrails (PII masking, output checks)
+├─ tech-support/
+│  ├─ layout.ts             # Domain-specific context
+│  ├─ mcp_tools.ts          # Jira/Slack tools for this branch only
+│  ├─ 0_triage.ts
+│  ├─ interrupt.ts          # Pause for approval on critical incidents
+│  ├─ 1_resolver.ts
+│  └─ linear.ts
+└─ risk-review/
+  ├─ parallel.ts           # Jury/consensus aggregator
+  ├─ legal/
+  │  └─ index.ts
+  ├─ security/
+  │  └─ index.ts
+  └─ finance/
+    └─ index.ts
+```
+
+This makes safety boundaries and approval points visible directly in the file tree.
 
 ## Architecture
 
@@ -830,6 +869,152 @@ For complete MCP Tool Injection documentation, architecture details, and example
 - [examples/agents/devops/mcp_tools.ts](./examples/agents/devops/mcp_tools.ts) — Real DevOps setup
 - [examples/agents/marketing/mcp_tools.ts](./examples/agents/marketing/mcp_tools.ts) — Real Marketing setup
 
+## Guardrail Middleware Pattern
+
+AFR now supports branch-level `middleware.ts` files that wrap execution for every agent inside that branch.
+
+### What Problem It Solves
+
+- **Input safety**: redact PII/PCI before requests reach the model.
+- **Output safety**: block forbidden language, unsafe claims, or policy violations.
+- **Branch governance**: enforce budget and policy checks by folder boundary.
+
+### How It Works
+
+- AFR resolves middleware from **root → leaf** along the call stack.
+- Hooks execute in order: `beforePrompt`, `beforeToolCall`, `afterToolResult`, `afterResponse`, `onError`.
+- The closest branch middleware can enforce strict branch-specific controls.
+
+```typescript
+// agents/finance/middleware.ts
+export default {
+  name: "finance-compliance",
+  async beforePrompt(req) {
+    return {
+      systemPrompt: `${req.systemPrompt}\n\nCompliance: Never expose PCI/PII.`,
+      messages: req.messages
+    };
+  },
+  async afterResponse(req) {
+    return { response: req.response.replace(/\b\d{3}-\d{2}-\d{4}\b/g, "***-**-****") };
+  }
+};
+```
+
+## Shared Directory Context with layout.ts
+
+AFR supports `layout.ts` files as inherited semantic wrappers for prompts.
+
+### What Problem It Solves
+
+- Eliminates duplicated system prompt fragments across sibling agents.
+- Prevents drift in coding standards, company tone, and compliance wording.
+
+### How It Works
+
+- AFR resolves layout files from root to active leaf.
+- `systemPromptPrefix` strings are concatenated in order.
+- Final prompt = inherited layout prefix + local agent system prompt.
+
+```typescript
+// agents/layout.ts
+export default {
+  systemPromptPrefix: "Global rules: be factual, concise, and audit-friendly."
+};
+
+// agents/coding-assistant/layout.ts
+export default {
+  systemPromptPrefix: "Tech stack: Node.js 20, TypeScript strict mode, ESM only."
+};
+```
+
+## Human-in-the-Loop Breakpoint with interrupt.ts
+
+Sequential chains can now pause using `interrupt.ts` and resume later with `resumeAgent`.
+
+### What Problem It Solves
+
+- Prevents autonomous execution of critical decisions without approval.
+- Enables long-running workflows that wait for human sign-off.
+
+### How It Works
+
+- If a sequential branch has `interrupt.ts`, AFR evaluates it before running `linear.ts`.
+- If interrupt says pause, AFR saves a snapshot and returns a paused result with `snapshotId`.
+- Resume with `resumeAgent(registry, sessionId, approvalData, options)`.
+
+```typescript
+import { executeAgent, resumeAgent, FileSnapshotStore } from "agentic-file-routing";
+
+const snapshotStore = new FileSnapshotStore();
+
+const firstRun = await executeAgent(registry, "root.tech-support", "Critical outage", {}, { snapshotStore });
+
+if (firstRun.paused) {
+  const resumed = await resumeAgent(registry, firstRun.context.sessionId, { approvedBy: "ops-manager" }, { snapshotStore });
+  console.log(resumed.success);
+}
+```
+
+## Parallel Ensemble Routing with parallel.ts
+
+AFR can execute all child agents concurrently and aggregate consensus through `parallel.ts`.
+
+### What Problem It Solves
+
+- Reduces single-agent bias/hallucination in high-stakes decisions.
+- Provides explicit multi-perspective adjudication.
+
+### How It Works
+
+- AFR detects `parallel.ts` (or `+debate/index.ts`) in a folder.
+- All child agents execute concurrently.
+- The parallel orchestrator receives all results and returns consensus output.
+
+```typescript
+// agents/risk-review/parallel.ts
+export async function run(ctx) {
+  const successful = ctx.results.filter(r => r.success);
+  return {
+    mode: "parallel-ensemble",
+    consensus: successful.map(r => ({ reviewer: r.childPath, summary: r.messages.at(-1)?.content ?? "" }))
+  };
+}
+```
+
+## NPM Readiness Enhancements
+
+### AFR Dev Server
+
+- Run `afr dev --agents ./examples/agents --port 3000`
+- Opens local UI with live graph and execution endpoints.
+
+### Hot Module Reloading (Registry Rebuild)
+
+- `RegistryReloader` watches the agents folder and rebuilds registry on file changes.
+- Dev server uses this for live updates without process restart.
+
+### State Snapshots
+
+- Built-in `SnapshotStore` interface with `InMemorySnapshotStore` and `FileSnapshotStore`.
+- AFR stores snapshots on failures and interrupt pauses.
+- Recover with `restartAgentFromSnapshot(...)` or `resumeAgent(...)`.
+
+### Provider Fallbacks
+
+- Add branch-level `fallback.ts` files to define provider/model failover chain.
+- AFR retries configured fallback providers automatically.
+
+```typescript
+// agents/devops/fallback.ts
+export default {
+  providers: [
+    { provider: "anthropic", modelId: "claude-3-5-sonnet-20241022", apiKeyEnv: "ANTHROPIC_API_KEY" },
+    { provider: "openrouter", modelId: "openai/gpt-4o-mini", apiKeyEnv: "OPENROUTER_API_KEY" }
+  ]
+};
+```
+
 ## Usage Guide
 
 ### Basic Execution
@@ -966,6 +1151,64 @@ const result = await executor.execute(
 // Automatically detects and executes the sequential chain
 ```
 
+### Human Approval Resume Flow
+
+```typescript
+import { executeAgent, resumeAgent, FileSnapshotStore } from "agentic-file-routing";
+
+const snapshotStore = new FileSnapshotStore();
+
+const paused = await executeAgent(
+  registry,
+  "root.tech-support",
+  "Critical incident affecting customer data",
+  { severity: "critical" },
+  { snapshotStore }
+);
+
+if (paused.paused) {
+  const resumed = await resumeAgent(
+    registry,
+    paused.context.sessionId,
+    { approvedBy: "manager-42", approvedAt: new Date().toISOString() },
+    { snapshotStore }
+  );
+  console.log(resumed.success);
+}
+```
+
+### Restart from Snapshot After Failure
+
+```typescript
+import { restartAgentFromSnapshot, listAgentSnapshots } from "agentic-file-routing";
+
+const snapshots = await listAgentSnapshots(registry, { snapshotStore });
+const latestFailed = snapshots.find((s) => s.status === "failed");
+
+if (latestFailed) {
+  const recovered = await restartAgentFromSnapshot(
+    registry,
+    latestFailed.id,
+    "Retry with same context",
+    { snapshotStore }
+  );
+  console.log(recovered.success);
+}
+```
+
+### Parallel Ensemble Branch Execution
+
+```typescript
+const result = await executeAgent(
+  registry,
+  "root.risk-review",
+  "Should we approve this high-risk enterprise rollout?"
+);
+
+// If risk-review has parallel.ts, AFR runs child agents concurrently and aggregates consensus.
+console.log(result.finalOutput);
+```
+
 ### Dynamic Segments (Coming in v2)
 
 ```typescript
@@ -1018,7 +1261,60 @@ interface ExecutionResult {
   finalOutput?: unknown;
   error?: Error;
   durationMs: number;
+  paused?: boolean;
+  snapshotId?: string;
 }
+```
+
+### `resumeAgent(registry, sessionId, approvalData, options)`
+
+Resume an interrupted workflow from a saved session snapshot.
+
+```typescript
+function resumeAgent(
+  registry: AgentRegistry,
+  sessionId: string,
+  approvalData: unknown,
+  options?: ExecutionOptions
+): Promise<ExecutionResult>
+```
+
+### `restartAgentFromSnapshot(registry, snapshotId, userInputOverride?, options?)`
+
+Restart execution from a failed/paused checkpoint.
+
+```typescript
+function restartAgentFromSnapshot(
+  registry: AgentRegistry,
+  snapshotId: string,
+  userInputOverride?: string,
+  options?: ExecutionOptions
+): Promise<ExecutionResult>
+```
+
+### `listAgentSnapshots(registry, options?)`
+
+List stored snapshots for observability and recovery workflows.
+
+```typescript
+function listAgentSnapshots(
+  registry: AgentRegistry,
+  options?: ExecutionOptions
+): Promise<ExecutionSnapshot[]>
+```
+
+### `startAfrDevServer(options)`
+
+Launch local AFR dev server with live graph and execute endpoints.
+
+```typescript
+function startAfrDevServer(options: {
+  agentsRootDir: string;
+  port?: number;
+  loadDefinitions?: boolean;
+  strictDefinitionLoading?: boolean;
+  rootLogicalPath?: string;
+}): Promise<void>
 ```
 
 ### `createProvider(config)`
@@ -1031,7 +1327,8 @@ function createProvider(config: ModelConfig): ILlmProvider
 
 **Supported Providers:**
 - `"openai"` → OpenAI GPT-4, GPT-4o family
-- `"anthropic"` → Anthropic Claude 3 family (coming: v2)
+- `"anthropic"` → Anthropic Claude 3 family
+- `"openrouter"` → OpenRouter model gateway
 
 ## Examples
 
@@ -1336,21 +1633,30 @@ See [Localized MCP Tool Injection](#localized-mcp-tool-injection) section and [M
 │   ├── errors.ts             # Error classes
 │   ├── path-utils.ts         # Route parsing
 │   ├── sequential.ts         # Sequential chain orchestration
+│   ├── parallel.ts           # Parallel ensemble orchestration
 │   ├── loader/
 │   │   ├── discover.ts       # Directory crawler
 │   │   ├── registry.ts       # Registry builder
-│   │   └── index.ts          # Loader exports
+│   │   └── module-resolver.ts # Runtime TS/JS module resolution
 │   ├── executor/
 │   │   ├── session.ts        # Session management
 │   │   ├── messages.ts       # Message types
 │   │   ├── executor.ts       # Core engine
 │   │   └── index.ts          # Executor exports
+│   ├── layout/
+│   │   └── loader.ts         # Hierarchical layout.ts resolver
+│   ├── snapshots/
+│   │   └── store.ts          # Snapshot persistence (memory/file)
+│   ├── dev/
+│   │   ├── reloader.ts       # Registry HMR watcher
+│   │   └── server.ts         # AFR dev server
 │   ├── providers/
 │   │   ├── types.ts          # Provider interface
 │   │   ├── openai.ts         # OpenAI adapter
 │   │   ├── anthropic.ts      # Anthropic adapter
 │   │   ├── openrouter.ts     # OpenRouter adapter
 │   │   ├── factory.ts        # Provider factory
+│   │   ├── fallback-loader.ts # Branch fallback.ts resolver
 │   │   └── index.ts          # Provider exports
 │   ├── mcp/
 │   │   ├── types.ts          # MCP type definitions
@@ -1373,7 +1679,9 @@ See [Localized MCP Tool Injection](#localized-mcp-tool-injection) section and [M
 │       │   ├── copywriting/
 │       │   └── seo/
 │       │       └── mcp_tools.ts  # Inherits + SEO tools
-│       └── competitor-analysis/  # Sequential workflow example
+│       ├── competitor-analysis/  # Sequential workflow + interrupt.ts example
+│       ├── risk-review/          # Parallel ensemble example (parallel.ts)
+│       └── finance/              # Branch middleware compliance example
 ├── dist/                     # Compiled output (generated)
 ├── SEQUENTIAL_CHAIN_ORCHESTRATION.md     # Sequential feature docs
 ├── SEQUENTIAL_IMPLEMENTATION_SUMMARY.md  # Implementation details
@@ -1392,6 +1700,9 @@ npm install
 
 # Build TypeScript
 npm run build
+
+# Start AFR dev server (graph + execute API)
+npm run dev
 
 # Run Milestone 2 demo (execution engine)
 node dist/demo.js
@@ -1417,16 +1728,16 @@ npm test
 - **Milestone 4-5**: Context inheritance, policy layer, and middleware
 - **Milestone 6**: Sequential Chain Orchestration (numbered agents + linear.ts orchestrators)
 - **Milestone 7**: Localized MCP Tool Injection (hierarchical MCP server scoping with mcp_tools.ts)
+- **Milestone 8**: Guardrail middleware + layout inheritance + interrupt/resume + parallel routing
+- **Milestone 9**: Dev server, registry HMR, snapshots, and provider fallback chain
 
 ### 🔄 In Progress
 
-- **Executor MCP Integration** — Injecting MCP tools into LLM calls
-- **CLI and Developer Experience Tools**
-- **Agent Template Scaffolding**
+- **Executor MCP Integration** — Injecting hydrated MCP tools directly into provider calls
+- **Production hardening** — Expanded tests, stricter config validation, and benchmark suite
 
 ### 📋 Planned
 
-- **Milestone 8**: Production hardening and npm publication
 - **v2.0**: Dynamic segment routing ([topic], [...path])
 - **v2.0**: Advanced middleware ecosystem
 - **v2.0**: Parallel execution support for sequential chains
