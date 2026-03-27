@@ -66,25 +66,25 @@ root/
 
 ## Key Features
 
-✅ **File-Based Routing** — Folder structure defines agent topology (no JSON configs)
-✅ **Hierarchical Tool Exposure** — Each agent sees only its direct children
-✅ **Recursive Composition** — Unlimited nesting; all agents follow same interface
-✅ **Sequential Chain Orchestration** — Explicit numbered agent workflows (0_step.ts → 1_step.ts → linear.ts)
-✅ **Localized MCP Tool Injection** — Folder-scoped Model Context Protocol servers (mcp_tools.ts per folder)
-✅ **Guardrail Middleware Pattern** — Branch-level middleware.ts hooks for input/output controls
-✅ **Shared Directory Context** — layout.ts prompt prefixes inherited root → leaf
-✅ **Human-in-the-Loop Interrupts** — interrupt.ts breakpoints + resumeAgent(sessionId, approvalData)
-✅ **Parallel Ensemble Routing** — parallel.ts jury over concurrent child-agent outputs
-✅ **Provider Fallback Chains** — fallback.ts for automatic provider/model failover
-✅ **Provider Agnostic** — Built-in adapters for OpenAI, Anthropic, and OpenRouter
-✅ **Zero External Dependencies** — HTTP fetch-based, no SDK bloat
-✅ **Context Inheritance** — Automatic parent-to-child parameter propagation
-✅ **Session Tracking** — Built-in traceId, sessionId, and call stacks
-✅ **Graceful Fallback** — Simulation mode when LLM provider unavailable
-✅ **State Snapshots** — Save/restore failed or paused runs from checkpoints
-✅ **AFR Dev Server + HMR** — afr dev graph UI with live registry rebuilds
-✅ **TypeScript First** — Full type safety and IntelliSense support
-✅ **Next.js-Like Routing** — Static and dynamic folder segments
+- ✅ **File-Based Routing** — Folder structure defines agent topology (no JSON configs)
+- ✅ **Hierarchical Tool Exposure** — Each agent sees only its direct children
+- ✅ **Recursive Composition** — Unlimited nesting; all agents follow same interface
+- ✅ **Sequential Chain Orchestration** — Explicit numbered agent workflows (0_step.ts → 1_step.ts → linear.ts)
+- ✅ **Localized MCP Tool Injection** — Folder-scoped Model Context Protocol servers (mcp_tools.ts per folder)
+- ✅ **Guardrail Middleware Pattern** — Branch-level middleware.ts hooks for input/output controls
+- ✅ **Shared Directory Context** — layout.ts prompt prefixes inherited root → leaf
+- ✅ **Human-in-the-Loop Interrupts** — interrupt.ts breakpoints + resumeAgent(sessionId, approvalData)
+- ✅ **Parallel Ensemble Routing** — parallel.ts jury over concurrent child-agent outputs
+- ✅ **Provider Fallback Chains** — fallback.ts for automatic provider/model failover
+- ✅ **Provider Agnostic** — Built-in adapters for OpenAI, Anthropic, and OpenRouter
+- ✅ **Zero External Dependencies** — HTTP fetch-based, no SDK bloat
+- ✅ **Context Inheritance** — Automatic parent-to-child parameter propagation
+- ✅ **Session Tracking** — Built-in traceId, sessionId, and call stacks
+- ✅ **Graceful Fallback** — Simulation mode when LLM provider unavailable
+- ✅ **State Snapshots** — Save/restore failed or paused runs from checkpoints
+- ✅ **AFR Dev Server + HMR** — afr dev graph UI with live registry rebuilds
+- ✅ **TypeScript First** — Full type safety and IntelliSense support
+- ✅ **Next.js-Like Routing** — Static and dynamic folder segments
 
 ## Installation
 
@@ -968,8 +968,38 @@ AFR can execute all child agents concurrently and aggregate consensus through `p
 ### How It Works
 
 - AFR detects `parallel.ts` (or `+debate/index.ts`) in a folder.
-- All child agents execute concurrently.
+- All child agents execute concurrently using fan-out/fan-in.
+- AFR uses `Promise.allSettled()` so one failed child does not collapse sibling results.
 - The parallel orchestrator receives all results and returns consensus output.
+
+### Fan-Out Runtime Modes
+
+Configure `ExecutionOptions.parallel` to select execution isolation:
+
+- `in-process` (default): concurrent sibling execution in the same Node.js process.
+- `worker_threads`: each sibling branch runs in a dedicated worker thread via a worker pool.
+- `remote`: branch execution is serialized and POSTed to a remote worker endpoint.
+
+```typescript
+const result = await executeAgent(
+  registry,
+  "root.risk-review",
+  "Should we approve this rollout?",
+  {},
+  {
+    parallel: {
+      mode: "worker_threads", // or "in-process" | "remote"
+      maxWorkers: 6,
+      failFast: false,
+      remote: {
+        endpoint: "https://your-worker.example.com/api/afr-worker",
+        apiKey: process.env.AFR_REMOTE_WORKER_KEY,
+        timeoutMs: 45000
+      }
+    }
+  }
+);
+```
 
 ```typescript
 // agents/risk-review/parallel.ts
@@ -1209,6 +1239,23 @@ const result = await executeAgent(
 console.log(result.finalOutput);
 ```
 
+### Remote Worker Endpoint Pattern
+
+Use `executeChildExecutionRequest` inside a serverless HTTP endpoint to process remote child jobs.
+
+```typescript
+import {
+  executeChildExecutionRequest,
+  type ChildExecutionRequest
+} from "agentic-file-routing";
+
+export async function POST(req: Request) {
+  const payload = (await req.json()) as ChildExecutionRequest;
+  const result = await executeChildExecutionRequest(payload);
+  return Response.json(result);
+}
+```
+
 ### Dynamic Segments (Coming in v2)
 
 ```typescript
@@ -1250,6 +1297,25 @@ function executeAgent(
   globalContext?: Record<string, unknown>,
   options?: ExecutionOptions
 ): Promise<ExecutionResult>
+```
+
+**ExecutionOptions (parallel additions):**
+
+```typescript
+interface ExecutionOptions {
+  // existing options omitted
+  parallel?: {
+    mode?: "in-process" | "worker_threads" | "remote";
+    maxWorkers?: number;
+    failFast?: boolean;
+    remote?: {
+      endpoint: string;
+      apiKey?: string;
+      headers?: Record<string, string>;
+      timeoutMs?: number;
+    };
+  };
+}
 ```
 
 **ExecutionResult:**

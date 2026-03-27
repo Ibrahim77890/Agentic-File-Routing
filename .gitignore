@@ -12,3 +12,8 @@ coverage/
 !README.md
 !.env.example
 
+example-nodejs-app/
+examples/
+*.json
+!package.json
+!package-lock.json

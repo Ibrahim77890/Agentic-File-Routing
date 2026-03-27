@@ -18,8 +18,17 @@ import {
   buildProviderFallbackChain,
   resolveProviderFallbackForContext
 } from "../providers/fallback-loader.js";
-import { aggregateParallelResults } from "../parallel.js";
+import { aggregateParallelResults, type ParallelChildResult } from "../parallel.js";
 import { InMemorySnapshotStore, createExecutionSnapshot } from "../snapshots/store.js";
+import {
+  type ChildExecutionRequest,
+  type ChildExecutionResponse,
+  type ParallelExecutionOptions,
+  type ParallelRuntimeMode,
+  type SerializableExecutionOptions
+} from "./parallel-runtime.js";
+import { RemoteProvider } from "./remote-provider.js";
+import { WorkerPool } from "./worker-pool.js";
 import {
   ExecutionContext,
   SessionFrame,
@@ -52,6 +61,7 @@ export interface ExecutionOptions {
   telemetryEnabled?: boolean;
   snapshotStore?: SnapshotStore;
   snapshotOnError?: boolean;
+  parallel?: ParallelExecutionOptions;
 }
 
 export interface ExecutionResult {
@@ -73,6 +83,14 @@ export class AfrExecutor {
   private middlewares: Middleware[];
   private telemetry: Telemetry | null;
   private snapshotStore: SnapshotStore;
+  private workerPool: WorkerPool | null;
+  private remoteProvider: RemoteProvider | null;
+
+  private static readonly DEFAULT_PARALLEL_OPTIONS: ParallelExecutionOptions = {
+    mode: "in-process",
+    maxWorkers: 4,
+    failFast: false
+  };
 
   constructor(registry: AgentRegistry, options: ExecutionOptions = {}) {
     this.registry = registry;
@@ -85,12 +103,19 @@ export class AfrExecutor {
       middlewares: options.middlewares,
       telemetryEnabled: options.telemetryEnabled ?? true,
       snapshotStore: options.snapshotStore,
-      snapshotOnError: options.snapshotOnError ?? true
+      snapshotOnError: options.snapshotOnError ?? true,
+      parallel: {
+        ...AfrExecutor.DEFAULT_PARALLEL_OPTIONS,
+        ...(options.parallel ?? {}),
+        remote: options.parallel?.remote
+      }
     };
 
     this.policyEnforcer = this.options.policyEnforcer ?? new DefaultPolicyEnforcer();
     this.middlewares = this.options.middlewares ?? [];
     this.snapshotStore = this.options.snapshotStore ?? new InMemorySnapshotStore();
+    this.workerPool = null;
+    this.remoteProvider = null;
     this.telemetry = this.options.telemetryEnabled
       ? createTelemetry("session-id", "trace-id")
       : null;
@@ -201,6 +226,101 @@ export class AfrExecutor {
 
   async listSnapshots() {
     return this.snapshotStore.list();
+  }
+
+  async executeChildInSession(
+    parentContext: ExecutionContext,
+    childPath: string,
+    userInput: string
+  ): Promise<ExecutionResult> {
+    const startTime = Date.now();
+
+    if (this.options.telemetryEnabled) {
+      this.telemetry = createTelemetry(parentContext.sessionId, parentContext.traceId);
+    }
+
+    const childRecord = this.registry.records[childPath];
+    const defaultContext = createChildExecutionContext(
+      parentContext,
+      childPath,
+      childRecord?.config ?? {}
+    );
+
+    const childFrame = createSessionFrame(defaultContext);
+    childFrame.messages.push(createUserMessage(userInput));
+
+    try {
+      if (!childRecord) {
+        throw new RoutingError(
+          `Agent path not found in registry: ${childPath}. Available paths: ${Object.keys(this.registry.records).join(", ")}.`
+        );
+      }
+
+      await this.executeFrame(childFrame);
+
+      return {
+        success: true,
+        context: childFrame.context,
+        messages: childFrame.messages,
+        finalOutput: childFrame.context.metadata.finalOutput,
+        durationMs: Date.now() - startTime,
+        paused: Boolean(childFrame.context.metadata.paused),
+        snapshotId: childFrame.context.metadata.snapshotId as string | undefined,
+        trace: this.telemetry?.trace()
+      };
+    } catch (error) {
+      return {
+        success: false,
+        context: childFrame.context,
+        messages: childFrame.messages,
+        error: error instanceof Error ? error : new Error(String(error)),
+        durationMs: Date.now() - startTime,
+        paused: false,
+        trace: this.telemetry?.trace()
+      };
+    }
+  }
+
+  private resolveParallelMode(): ParallelRuntimeMode {
+    const mode = this.options.parallel?.mode ?? "in-process";
+
+    if (mode === "remote" && !this.options.parallel?.remote) {
+      throw new ExecutionError("Parallel mode 'remote' requires options.parallel.remote configuration");
+    }
+
+    return mode;
+  }
+
+  private getWorkerPool(): WorkerPool {
+    if (!this.workerPool) {
+      this.workerPool = new WorkerPool(this.options.parallel?.maxWorkers ?? 4);
+    }
+
+    return this.workerPool;
+  }
+
+  private getRemoteProvider(): RemoteProvider {
+    if (!this.options.parallel?.remote) {
+      throw new ExecutionError("Remote provider requested, but options.parallel.remote is undefined");
+    }
+
+    if (!this.remoteProvider) {
+      this.remoteProvider = new RemoteProvider(this.options.parallel.remote);
+    }
+
+    return this.remoteProvider;
+  }
+
+  private getSerializableOptions(): SerializableExecutionOptions {
+    return {
+      maxDepth: this.options.maxDepth,
+      timeoutMs: this.options.timeoutMs,
+      strictMode: this.options.strictMode,
+      modelConfig: this.options.modelConfig,
+      telemetryEnabled: this.options.telemetryEnabled,
+      snapshotOnError: this.options.snapshotOnError,
+      parallel: this.options.parallel
+    };
   }
 
   private async executeFrame(frame: SessionFrame): Promise<void> {
@@ -509,52 +629,154 @@ export class AfrExecutor {
 
   private async executeParallelBranch(record: AgentRegistryRecord, frame: SessionFrame): Promise<unknown> {
     const currentInput = frame.context.globalContext.userInput ?? frame.context.globalContext;
+    const inputText = String(currentInput ?? "");
+    const parallelMode = this.resolveParallelMode();
 
-    const childFrames = await Promise.all(
-      record.childrenPaths.map(async (childPath) => {
-        const childRecord = this.registry.records[childPath];
-        if (!childRecord) {
-          return {
-            childPath,
-            success: false,
-            messages: [],
-            error: `Missing child record: ${childPath}`
-          };
-        }
-
-        const childContext = createChildExecutionContext(frame.context, childPath, childRecord.config);
-        const childFrame = createSessionFrame(childContext);
-        childFrame.messages.push(createUserMessage(String(currentInput ?? "")));
-
-        try {
-          await this.executeFrame(childFrame);
-          frame.childFrames.push(childFrame);
-          return {
-            childPath,
-            success: true,
-            messages: childFrame.messages.map((msg) => ({ role: msg.role, content: msg.content }))
-          };
-        } catch (error) {
-          return {
-            childPath,
-            success: false,
-            messages: childFrame.messages.map((msg) => ({ role: msg.role, content: msg.content })),
-            error: error instanceof Error ? error.message : String(error)
-          };
-        }
-      })
+    const settled = await Promise.allSettled(
+      record.childrenPaths.map((childPath) =>
+        this.executeParallelChild(childPath, frame, inputText, parallelMode)
+      )
     );
+
+    const childResults: ParallelChildResult[] = settled.map((result, index) => {
+      if (result.status === "fulfilled") {
+        return result.value;
+      }
+
+      return {
+        childPath: record.childrenPaths[index],
+        success: false,
+        messages: [],
+        error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+      };
+    });
+
+    if ((this.options.parallel?.failFast ?? false) && childResults.every((result) => !result.success)) {
+      throw new ExecutionError(`Parallel fan-out failed for ${record.logicalPath}: all child agents failed.`);
+    }
+
+    frame.context.metadata.parallelExecution = {
+      mode: parallelMode,
+      totalChildren: childResults.length,
+      successfulChildren: childResults.filter((result) => result.success).length,
+      failedChildren: childResults.filter((result) => !result.success).length
+    };
 
     const aggregated = await aggregateParallelResults(record.parallelWorkflow!, {
       agentPath: frame.context.currentPath,
       sessionId: frame.context.sessionId,
       traceId: frame.context.traceId,
       input: currentInput,
-      results: childFrames
+      results: childResults
     });
 
     frame.messages.push(createAssistantMessage(`Parallel consensus: ${JSON.stringify(aggregated)}`));
     return aggregated;
+  }
+
+  private async executeParallelChild(
+    childPath: string,
+    parentFrame: SessionFrame,
+    userInput: string,
+    mode: ParallelRuntimeMode
+  ): Promise<ParallelChildResult> {
+    switch (mode) {
+      case "worker_threads":
+        return this.executeParallelChildInWorker(childPath, parentFrame, userInput);
+      case "remote":
+        return this.executeParallelChildRemotely(childPath, parentFrame, userInput);
+      case "in-process":
+      default:
+        return this.executeParallelChildInProcess(childPath, parentFrame, userInput);
+    }
+  }
+
+  private async executeParallelChildInProcess(
+    childPath: string,
+    parentFrame: SessionFrame,
+    userInput: string
+  ): Promise<ParallelChildResult> {
+    const childRecord = this.registry.records[childPath];
+    if (!childRecord) {
+      throw new RoutingError(`Missing child record: ${childPath}`);
+    }
+
+    const startTime = Date.now();
+    const childContext = createChildExecutionContext(parentFrame.context, childPath, childRecord.config);
+    const childFrame = createSessionFrame(childContext);
+    childFrame.messages.push(createUserMessage(userInput));
+
+    try {
+      await this.executeFrame(childFrame);
+      parentFrame.childFrames.push(childFrame);
+
+      return {
+        childPath,
+        success: true,
+        messages: childFrame.messages.map((message) => ({
+          role: message.role,
+          content: message.content
+        })),
+        finalOutput: childFrame.context.metadata.finalOutput,
+        durationMs: Date.now() - startTime
+      };
+    } catch (error) {
+      return {
+        childPath,
+        success: false,
+        messages: childFrame.messages.map((message) => ({
+          role: message.role,
+          content: message.content
+        })),
+        durationMs: Date.now() - startTime,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  private async executeParallelChildInWorker(
+    childPath: string,
+    parentFrame: SessionFrame,
+    userInput: string
+  ): Promise<ParallelChildResult> {
+    const request: ChildExecutionRequest = {
+      registry: this.registry,
+      parentContext: parentFrame.context,
+      childPath,
+      userInput,
+      options: this.getSerializableOptions()
+    };
+
+    const response = await this.getWorkerPool().execute(request);
+    return this.mapChildExecutionResponse(response);
+  }
+
+  private async executeParallelChildRemotely(
+    childPath: string,
+    parentFrame: SessionFrame,
+    userInput: string
+  ): Promise<ParallelChildResult> {
+    const request: ChildExecutionRequest = {
+      registry: this.registry,
+      parentContext: parentFrame.context,
+      childPath,
+      userInput,
+      options: this.getSerializableOptions()
+    };
+
+    const response = await this.getRemoteProvider().executeChild(request);
+    return this.mapChildExecutionResponse(response);
+  }
+
+  private mapChildExecutionResponse(response: ChildExecutionResponse): ParallelChildResult {
+    return {
+      childPath: response.childPath,
+      success: response.success,
+      messages: response.messages,
+      finalOutput: response.finalOutput,
+      durationMs: response.durationMs,
+      error: response.error
+    };
   }
 
   private simulationFallback(record: AgentRegistryRecord): AssistantMessage | null {

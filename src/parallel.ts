@@ -9,6 +9,8 @@ export interface ParallelChildResult {
     role: string;
     content: string;
   }>;
+  finalOutput?: unknown;
+  durationMs?: number;
   error?: string;
 }
 
