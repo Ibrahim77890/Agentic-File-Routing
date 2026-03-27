@@ -2,9 +2,10 @@ import {
   RoutingError,
   ExecutionError,
   TimeoutError,
-  SnapshotNotFoundError
+  SnapshotNotFoundError,
+  BudgetExceededError
 } from "../errors.js";
-import { AgentRegistry, AgentRegistryRecord, SnapshotStore } from "../types.js";
+import { AgentRegistry, AgentRegistryRecord, SnapshotStore, type BudgetConfig } from "../types.js";
 import type { ModelConfig } from "../providers/types.js";
 import { createProvider, registryToolToProviderTool } from "../providers/index.js";
 import type { Middleware } from "../middleware/types.js";
@@ -50,6 +51,21 @@ import {
 } from "./messages.js";
 import { executeSequentialWorkflow } from "../sequential.js";
 import { MiddlewarePipeline as Pipeline } from "../middleware/types.js";
+import {
+  resolveBudgetForContext,
+  resolveTierConfigForContext,
+  applyTierToModelConfig,
+  resolveCachePolicyForContext,
+  buildPathAwareCacheKey,
+  getSharedPathCache,
+  loadLadderConfig,
+  loadSimpleExecution,
+  requiresEscalation,
+  extractLadderOutput,
+  estimateCostUsd,
+  type InMemoryPathCache
+} from "../economic/index.js";
+import type { EconomicState, EconomicSummary } from "../economic/types.js";
 
 export interface ExecutionOptions {
   maxDepth?: number;
@@ -85,11 +101,14 @@ export class AfrExecutor {
   private snapshotStore: SnapshotStore;
   private workerPool: WorkerPool | null;
   private remoteProvider: RemoteProvider | null;
+  private pathCache: InMemoryPathCache;
 
   private static readonly DEFAULT_PARALLEL_OPTIONS: ParallelExecutionOptions = {
     mode: "in-process",
     maxWorkers: 4,
-    failFast: false
+    failFast: false,
+    enableShortCircuit: true,
+    shortCircuitConfidence: 0.95
   };
 
   constructor(registry: AgentRegistry, options: ExecutionOptions = {}) {
@@ -116,6 +135,7 @@ export class AfrExecutor {
     this.snapshotStore = this.options.snapshotStore ?? new InMemorySnapshotStore();
     this.workerPool = null;
     this.remoteProvider = null;
+    this.pathCache = getSharedPathCache();
     this.telemetry = this.options.telemetryEnabled
       ? createTelemetry("session-id", "trace-id")
       : null;
@@ -149,7 +169,8 @@ export class AfrExecutor {
       });
       context.metadata = {
         ...context.metadata,
-        ...runtimeMetadata
+        ...runtimeMetadata,
+        economicState: this.createEconomicState()
       };
 
       const frame = createSessionFrame(context);
@@ -333,6 +354,11 @@ export class AfrExecutor {
     }
 
     try {
+      const abortSignal = context.metadata.abortSignal as AbortSignal | undefined;
+      if (abortSignal?.aborted) {
+        throw new ExecutionError(`Execution aborted at ${context.currentPath}`);
+      }
+
       if (context.depth > (this.options.maxDepth ?? 10)) {
         throw new ExecutionError(
           `Max execution depth exceeded at ${context.currentPath} (depth: ${context.depth})`
@@ -360,8 +386,38 @@ export class AfrExecutor {
       const mergedContext = mergeContextWithLocalConfig(context, record.config);
       frame.context = mergedContext;
 
+      const economicState = this.getOrCreateEconomicState(mergedContext);
+      this.recordPathInvocation(economicState, mergedContext.currentPath);
+
+      const budget = await resolveBudgetForContext(this.registry, mergedContext);
+      this.incrementStepUsage(economicState, mergedContext.currentPath);
+      this.ensureBudgetLimit(budget?.maxSteps, economicState.stepsUsed, "maxSteps", mergedContext.currentPath);
+      this.ensureBudgetLimit(budget?.maxTokens, economicState.tokensUsed, "maxTokens", mergedContext.currentPath);
+      this.ensureBudgetLimit(budget?.maxTools, economicState.toolsUsed, "maxTools", mergedContext.currentPath);
+      this.publishEconomicSummary(mergedContext, budget);
+
       const branchMiddlewares = await loadMiddlewareForContext(this.registry, mergedContext.callStack);
       middlewarePipeline = new Pipeline([...this.middlewares, ...branchMiddlewares]);
+
+      const cacheInput = mergedContext.globalContext?.userInput ?? mergedContext.globalContext;
+      const cacheHit = await this.tryReadFromCache(mergedContext, cacheInput);
+      if (cacheHit.hit) {
+        frame.messages.push(
+          createAssistantMessage(`Cache hit for ${mergedContext.currentPath}: ${JSON.stringify(cacheHit.value)}`)
+        );
+        frame.context.metadata.finalOutput = cacheHit.value;
+        this.publishEconomicSummary(mergedContext, budget);
+        return;
+      }
+
+      const ladder = await this.tryExecuteEscalationLadder(record, mergedContext, cacheInput);
+      if (ladder.handled) {
+        frame.messages.push(createAssistantMessage(`Escalation ladder resolved: ${JSON.stringify(ladder.output)}`));
+        frame.context.metadata.finalOutput = ladder.output;
+        await this.tryWriteToCache(mergedContext, cacheInput, ladder.output);
+        this.publishEconomicSummary(mergedContext, budget);
+        return;
+      }
 
       // Check for sequential workflow execution
       if (record.sequentialWorkflow?.hasSequentialAgents) {
@@ -385,6 +441,8 @@ export class AfrExecutor {
           const content = `Sequential workflow executed: ${JSON.stringify(sequentialResult.output)}`;
           frame.messages.push(createAssistantMessage(content));
           frame.context.metadata.finalOutput = sequentialResult.output;
+          await this.tryWriteToCache(mergedContext, cacheInput, sequentialResult.output);
+          this.publishEconomicSummary(mergedContext, budget);
           return;
         }
 
@@ -408,6 +466,8 @@ export class AfrExecutor {
       if (record.parallelWorkflow && record.childrenPaths.length > 0) {
         const parallelOutput = await this.executeParallelBranch(record, frame);
         frame.context.metadata.finalOutput = parallelOutput;
+        await this.tryWriteToCache(mergedContext, cacheInput, parallelOutput);
+        this.publishEconomicSummary(mergedContext, budget);
         return;
       }
 
@@ -431,7 +491,8 @@ export class AfrExecutor {
         record,
         frame,
         beforePromptResult.systemPrompt,
-        mergedContext
+        mergedContext,
+        budget?.maxTokens
       );
 
       if (toolCallResult) {
@@ -454,7 +515,7 @@ export class AfrExecutor {
         if (finalizedAssistantMessage.toolCalls && finalizedAssistantMessage.toolCalls.length > 0) {
           for (const toolCall of finalizedAssistantMessage.toolCalls) {
             if (this.telemetry) {
-              this.telemetry.recordToolCall(context.currentPath, toolCall.toolName);
+              this.telemetry.recordToolCall(mergedContext.currentPath, toolCall.toolName);
             }
 
             const beforeToolResult = await middlewarePipeline.executeBeforeToolCall({
@@ -476,6 +537,16 @@ export class AfrExecutor {
               );
               continue;
             }
+
+            const economicStateForTool = this.getOrCreateEconomicState(mergedContext);
+            this.incrementToolUsage(economicStateForTool, mergedContext.currentPath);
+            this.ensureBudgetLimit(
+              budget?.maxTools,
+              economicStateForTool.toolsUsed,
+              "maxTools",
+              mergedContext.currentPath
+            );
+            this.publishEconomicSummary(mergedContext, budget);
 
             const childResult = await this.handleToolCall(beforeToolResult.toolCall, frame);
 
@@ -500,7 +571,7 @@ export class AfrExecutor {
 
             if (this.telemetry) {
               this.telemetry.recordToolResult(
-                context.currentPath,
+                mergedContext.currentPath,
                 toolCall.toolName,
                 afterToolResult.isError
               );
@@ -509,8 +580,11 @@ export class AfrExecutor {
         }
       }
 
+      await this.tryWriteToCache(mergedContext, cacheInput, frame.context.metadata.finalOutput);
+      this.publishEconomicSummary(mergedContext, budget);
+
       if (this.telemetry) {
-        this.telemetry.recordAgentEnd(context.currentPath, Date.now() - startTime);
+        this.telemetry.recordAgentEnd(mergedContext.currentPath, Date.now() - startTime);
       }
     } catch (error) {
       if (middlewarePipeline) {
@@ -560,16 +634,29 @@ export class AfrExecutor {
     record: AgentRegistryRecord,
     frame: SessionFrame,
     systemPrompt: string,
-    context: ExecutionContext
+    context: ExecutionContext,
+    maxTokenBudget?: number
   ): Promise<AssistantMessage | null> {
     if (!this.options.modelConfig) {
       return this.simulationFallback(record);
     }
 
-    let providerChain = [this.options.modelConfig];
+    const tierResolution = await resolveTierConfigForContext(this.registry, context);
+    const tieredBaseModelConfig = applyTierToModelConfig(this.options.modelConfig, tierResolution.tier);
+    const baseModelConfig = record.definition?.model
+      ? { ...tieredBaseModelConfig, modelId: record.definition.model }
+      : tieredBaseModelConfig;
+
+    context.metadata.modelRouting = {
+      resolvedModel: baseModelConfig.modelId,
+      resolvedProvider: baseModelConfig.provider,
+      tierSources: tierResolution.sourcePaths
+    };
+
+    let providerChain = [baseModelConfig];
     try {
       const fallbackConfig = await resolveProviderFallbackForContext(this.registry, context);
-      providerChain = buildProviderFallbackChain(this.options.modelConfig, fallbackConfig);
+      providerChain = buildProviderFallbackChain(baseModelConfig, fallbackConfig);
     } catch (error) {
       console.warn(
         `Failed to resolve provider fallback for ${context.currentPath}, continuing with primary provider:`,
@@ -582,13 +669,44 @@ export class AfrExecutor {
 
     for (const modelConfig of providerChain) {
       try {
-        const provider = createProvider(modelConfig);
+        const economicState = this.getOrCreateEconomicState(context);
+        const remainingTokens =
+          maxTokenBudget !== undefined
+            ? Math.max(0, maxTokenBudget - economicState.tokensUsed)
+            : undefined;
+
+        if (remainingTokens !== undefined && remainingTokens <= 0) {
+          throw new BudgetExceededError(
+            `Token budget exhausted at ${context.currentPath}. Allowed ${maxTokenBudget} total tokens.`
+          );
+        }
+
+        const budgetAwareModelConfig: ModelConfig = {
+          ...modelConfig,
+          maxTokens:
+            remainingTokens !== undefined
+              ? Math.max(1, Math.min(modelConfig.maxTokens ?? remainingTokens, remainingTokens))
+              : modelConfig.maxTokens
+        };
+
+        const provider = createProvider(budgetAwareModelConfig);
         const response = await provider.callModel({
           messages: frame.messages,
           tools: providerTools,
           systemPrompt,
-          config: modelConfig
+          config: budgetAwareModelConfig,
+          signal: context.metadata.abortSignal as AbortSignal | undefined
         });
+
+        const inputTokens = response.usage?.inputTokens ?? 0;
+        const outputTokens = response.usage?.outputTokens ?? 0;
+        this.recordTokenUsage(context, budgetAwareModelConfig, inputTokens, outputTokens);
+        this.ensureBudgetLimit(
+          maxTokenBudget,
+          this.getOrCreateEconomicState(context).tokensUsed,
+          "maxTokens",
+          context.currentPath
+        );
 
         if (response.toolCalls && response.toolCalls.length > 0) {
           const mappedToolCalls = response.toolCalls.map((call: ToolCall) => {
@@ -632,24 +750,85 @@ export class AfrExecutor {
     const inputText = String(currentInput ?? "");
     const parallelMode = this.resolveParallelMode();
 
-    const settled = await Promise.allSettled(
-      record.childrenPaths.map((childPath) =>
-        this.executeParallelChild(childPath, frame, inputText, parallelMode)
-      )
+    const shortCircuitEnabled = this.options.parallel?.enableShortCircuit ?? true;
+    const confidenceThreshold = this.options.parallel?.shortCircuitConfidence ?? 0.95;
+    const maxConcurrency = Math.max(
+      1,
+      Math.min(record.childrenPaths.length, this.options.parallel?.maxWorkers ?? record.childrenPaths.length)
     );
 
-    const childResults: ParallelChildResult[] = settled.map((result, index) => {
-      if (result.status === "fulfilled") {
-        return result.value;
+    const pendingChildren = [...record.childrenPaths];
+    const activeChildren = new Map<
+      string,
+      {
+        promise: Promise<ParallelChildResult>;
+        abortController?: AbortController;
+      }
+    >();
+    const childResults: ParallelChildResult[] = [];
+    let shortCircuitWinner: { childPath: string; confidence: number } | null = null;
+
+    const launchNextChild = () => {
+      const childPath = pendingChildren.shift();
+      if (!childPath) {
+        return;
       }
 
-      return {
-        childPath: record.childrenPaths[index],
-        success: false,
-        messages: [],
-        error: result.reason instanceof Error ? result.reason.message : String(result.reason)
-      };
-    });
+      const abortController = parallelMode === "in-process" ? new AbortController() : undefined;
+      activeChildren.set(childPath, {
+        promise: this.executeParallelChild(childPath, frame, inputText, parallelMode, abortController),
+        abortController
+      });
+    };
+
+    while (activeChildren.size < maxConcurrency && pendingChildren.length > 0) {
+      launchNextChild();
+    }
+
+    while (activeChildren.size > 0) {
+      const nextSettled = await Promise.race(
+        Array.from(activeChildren.entries()).map(([childPath, running]) =>
+          running.promise
+            .then((result) => ({ childPath, result }))
+            .catch((error) => ({
+              childPath,
+              result: {
+                childPath,
+                success: false,
+                messages: [],
+                error: error instanceof Error ? error.message : String(error)
+              } satisfies ParallelChildResult
+            }))
+        )
+      );
+
+      activeChildren.delete(nextSettled.childPath);
+      childResults.push(nextSettled.result);
+
+      if (shortCircuitEnabled && !shortCircuitWinner && nextSettled.result.success) {
+        const confidence = this.extractConfidenceScore(nextSettled.result.finalOutput);
+        if (confidence !== undefined && confidence >= confidenceThreshold) {
+          shortCircuitWinner = {
+            childPath: nextSettled.childPath,
+            confidence
+          };
+
+          for (const [activePath, running] of activeChildren.entries()) {
+            if (activePath === nextSettled.childPath) {
+              continue;
+            }
+
+            running.abortController?.abort();
+          }
+        }
+      }
+
+      if (!shortCircuitWinner) {
+        while (activeChildren.size < maxConcurrency && pendingChildren.length > 0) {
+          launchNextChild();
+        }
+      }
+    }
 
     if ((this.options.parallel?.failFast ?? false) && childResults.every((result) => !result.success)) {
       throw new ExecutionError(`Parallel fan-out failed for ${record.logicalPath}: all child agents failed.`);
@@ -659,7 +838,9 @@ export class AfrExecutor {
       mode: parallelMode,
       totalChildren: childResults.length,
       successfulChildren: childResults.filter((result) => result.success).length,
-      failedChildren: childResults.filter((result) => !result.success).length
+      failedChildren: childResults.filter((result) => !result.success).length,
+      shortCircuited: Boolean(shortCircuitWinner),
+      shortCircuitWinner
     };
 
     const aggregated = await aggregateParallelResults(record.parallelWorkflow!, {
@@ -678,7 +859,8 @@ export class AfrExecutor {
     childPath: string,
     parentFrame: SessionFrame,
     userInput: string,
-    mode: ParallelRuntimeMode
+    mode: ParallelRuntimeMode,
+    abortController?: AbortController
   ): Promise<ParallelChildResult> {
     switch (mode) {
       case "worker_threads":
@@ -687,14 +869,15 @@ export class AfrExecutor {
         return this.executeParallelChildRemotely(childPath, parentFrame, userInput);
       case "in-process":
       default:
-        return this.executeParallelChildInProcess(childPath, parentFrame, userInput);
+        return this.executeParallelChildInProcess(childPath, parentFrame, userInput, abortController);
     }
   }
 
   private async executeParallelChildInProcess(
     childPath: string,
     parentFrame: SessionFrame,
-    userInput: string
+    userInput: string,
+    abortController?: AbortController
   ): Promise<ParallelChildResult> {
     const childRecord = this.registry.records[childPath];
     if (!childRecord) {
@@ -703,6 +886,10 @@ export class AfrExecutor {
 
     const startTime = Date.now();
     const childContext = createChildExecutionContext(parentFrame.context, childPath, childRecord.config);
+    childContext.metadata = {
+      ...childContext.metadata,
+      abortSignal: abortController?.signal
+    };
     const childFrame = createSessionFrame(childContext);
     childFrame.messages.push(createUserMessage(userInput));
 
@@ -718,9 +905,11 @@ export class AfrExecutor {
           content: message.content
         })),
         finalOutput: childFrame.context.metadata.finalOutput,
+        confidence: this.extractConfidenceScore(childFrame.context.metadata.finalOutput),
         durationMs: Date.now() - startTime
       };
     } catch (error) {
+      const aborted = abortController?.signal.aborted === true;
       return {
         childPath,
         success: false,
@@ -728,6 +917,7 @@ export class AfrExecutor {
           role: message.role,
           content: message.content
         })),
+        aborted,
         durationMs: Date.now() - startTime,
         error: error instanceof Error ? error.message : String(error)
       };
@@ -774,9 +964,235 @@ export class AfrExecutor {
       success: response.success,
       messages: response.messages,
       finalOutput: response.finalOutput,
+      confidence: this.extractConfidenceScore(response.finalOutput),
       durationMs: response.durationMs,
       error: response.error
     };
+  }
+
+  private createEconomicState(): EconomicState {
+    return {
+      stepsUsed: 0,
+      toolsUsed: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      tokensUsed: 0,
+      estimatedCostUsd: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
+      callsByPath: {}
+    };
+  }
+
+  private getOrCreateEconomicState(context: ExecutionContext): EconomicState {
+    const maybeExisting = context.metadata.economicState as EconomicState | undefined;
+    if (maybeExisting) {
+      return maybeExisting;
+    }
+
+    const state = this.createEconomicState();
+    context.metadata.economicState = state;
+    return state;
+  }
+
+  private getOrCreatePathUsage(state: EconomicState, path: string) {
+    const existing = state.callsByPath[path];
+    if (existing) {
+      return existing;
+    }
+
+    state.callsByPath[path] = {
+      path,
+      calls: 0,
+      steps: 0,
+      toolCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      estimatedCostUsd: 0,
+      cacheHits: 0,
+      cacheMisses: 0
+    };
+
+    return state.callsByPath[path];
+  }
+
+  private recordPathInvocation(state: EconomicState, path: string): void {
+    const usage = this.getOrCreatePathUsage(state, path);
+    usage.calls += 1;
+  }
+
+  private incrementStepUsage(state: EconomicState, path: string): void {
+    state.stepsUsed += 1;
+    const usage = this.getOrCreatePathUsage(state, path);
+    usage.steps += 1;
+  }
+
+  private incrementToolUsage(state: EconomicState, path: string): void {
+    state.toolsUsed += 1;
+    const usage = this.getOrCreatePathUsage(state, path);
+    usage.toolCalls += 1;
+  }
+
+  private recordTokenUsage(
+    context: ExecutionContext,
+    modelConfig: ModelConfig,
+    inputTokens: number,
+    outputTokens: number
+  ): void {
+    const state = this.getOrCreateEconomicState(context);
+    state.inputTokens += inputTokens;
+    state.outputTokens += outputTokens;
+    state.tokensUsed += inputTokens + outputTokens;
+
+    const usage = this.getOrCreatePathUsage(state, context.currentPath);
+    usage.inputTokens += inputTokens;
+    usage.outputTokens += outputTokens;
+    usage.totalTokens += inputTokens + outputTokens;
+    usage.lastProvider = modelConfig.provider;
+    usage.lastModelId = modelConfig.modelId;
+
+    const callCost = estimateCostUsd(modelConfig, { inputTokens, outputTokens });
+    state.estimatedCostUsd += callCost;
+    usage.estimatedCostUsd += callCost;
+  }
+
+  private ensureBudgetLimit(
+    limit: number | undefined,
+    current: number,
+    label: "maxSteps" | "maxTokens" | "maxTools",
+    path: string
+  ): void {
+    if (limit === undefined) {
+      return;
+    }
+
+    if (current > limit) {
+      throw new BudgetExceededError(
+        `Budget exceeded for ${path}: ${label}=${current} (limit ${limit}).`
+      );
+    }
+  }
+
+  private toEconomicSummary(state: EconomicState, budget?: BudgetConfig): EconomicSummary {
+    const totalCacheEvents = state.cacheHits + state.cacheMisses;
+    return {
+      stepsUsed: state.stepsUsed,
+      toolsUsed: state.toolsUsed,
+      inputTokens: state.inputTokens,
+      outputTokens: state.outputTokens,
+      tokensUsed: state.tokensUsed,
+      estimatedCostUsd: Number(state.estimatedCostUsd.toFixed(6)),
+      cacheHits: state.cacheHits,
+      cacheMisses: state.cacheMisses,
+      cacheHitRate: totalCacheEvents > 0 ? state.cacheHits / totalCacheEvents : 0,
+      byPath: Object.values(state.callsByPath).sort((a, b) => b.estimatedCostUsd - a.estimatedCostUsd),
+      activeBudget: budget
+    };
+  }
+
+  private publishEconomicSummary(context: ExecutionContext, budget?: BudgetConfig): void {
+    const state = this.getOrCreateEconomicState(context);
+    context.metadata.economic = this.toEconomicSummary(state, budget);
+  }
+
+  private async tryReadFromCache(
+    context: ExecutionContext,
+    input: unknown
+  ): Promise<{ hit: boolean; value?: unknown }> {
+    const { policy } = await resolveCachePolicyForContext(this.registry, context);
+    if (!policy || policy.enabled === false) {
+      return { hit: false };
+    }
+
+    this.pathCache.clearExpired();
+    const key = buildPathAwareCacheKey(context.currentPath, input);
+    const value = this.pathCache.get(key);
+
+    const state = this.getOrCreateEconomicState(context);
+    const usage = this.getOrCreatePathUsage(state, context.currentPath);
+
+    if (value !== undefined) {
+      state.cacheHits += 1;
+      usage.cacheHits += 1;
+      return { hit: true, value };
+    }
+
+    state.cacheMisses += 1;
+    usage.cacheMisses += 1;
+    return { hit: false };
+  }
+
+  private async tryWriteToCache(context: ExecutionContext, input: unknown, output: unknown): Promise<void> {
+    if (output === undefined) {
+      return;
+    }
+
+    const { policy } = await resolveCachePolicyForContext(this.registry, context);
+    if (!policy || policy.enabled === false) {
+      return;
+    }
+
+    const key = buildPathAwareCacheKey(context.currentPath, input);
+    this.pathCache.set(key, output, policy.ttlMs ?? 10 * 60 * 1000);
+  }
+
+  private async tryExecuteEscalationLadder(
+    record: AgentRegistryRecord,
+    context: ExecutionContext,
+    input: unknown
+  ): Promise<{ handled: boolean; output?: unknown }> {
+    const ladderConfig = record.ladderConfig;
+    if (!ladderConfig?.simplePath) {
+      return { handled: false };
+    }
+
+    const ladder = await loadLadderConfig(ladderConfig.ladderPath);
+    if (ladder.enabled === false) {
+      return { handled: false };
+    }
+
+    const simpleFn = await loadSimpleExecution(ladderConfig.simplePath);
+    const result = await simpleFn({
+      input,
+      sessionId: context.sessionId,
+      traceId: context.traceId,
+      agentPath: context.currentPath
+    });
+
+    const shouldEscalate = requiresEscalation(result, ladder.escalateSignal ?? "REASONING_REQUIRED");
+    if (shouldEscalate) {
+      return { handled: false };
+    }
+
+    return {
+      handled: true,
+      output: extractLadderOutput(result)
+    };
+  }
+
+  private extractConfidenceScore(output: unknown): number | undefined {
+    if (!output || typeof output !== "object") {
+      return undefined;
+    }
+
+    const record = output as Record<string, unknown>;
+    const direct = [record.confidence, record.confidenceScore, record.score].find(
+      (value) => typeof value === "number"
+    );
+    if (typeof direct === "number") {
+      return direct;
+    }
+
+    const nested = record.metadata;
+    if (nested && typeof nested === "object") {
+      const nestedConfidence = (nested as Record<string, unknown>).confidence;
+      if (typeof nestedConfidence === "number") {
+        return nestedConfidence;
+      }
+    }
+
+    return undefined;
   }
 
   private simulationFallback(record: AgentRegistryRecord): AssistantMessage | null {

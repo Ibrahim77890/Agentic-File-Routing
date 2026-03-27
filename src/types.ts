@@ -57,6 +57,55 @@ export interface AgentProviderFallback {
   config?: ProviderFallbackConfig;
 }
 
+export interface TierConfig {
+  provider?: ProviderName;
+  modelId?: string;
+  apiKey?: string;
+  apiKeyEnv?: string;
+  temperature?: number;
+  maxTokens?: number;
+  topP?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+}
+
+export interface AgentTierRoutingConfig {
+  hasTierConfig: boolean;
+  tierPath?: string;
+}
+
+export interface BudgetConfig {
+  maxSteps?: number;
+  maxTokens?: number;
+  maxTools?: number;
+}
+
+export interface AgentBudgetConfig {
+  hasBudgetConfig: boolean;
+  budgetPath?: string;
+}
+
+export interface EscalationLadderConfig {
+  enabled?: boolean;
+  escalateSignal?: string;
+}
+
+export interface AgentEscalationLadder {
+  hasLadderConfig: boolean;
+  ladderPath?: string;
+  simplePath?: string;
+}
+
+export interface CachePolicyConfig {
+  enabled?: boolean;
+  ttlMs?: number;
+}
+
+export interface AgentCacheConfig {
+  hasCacheConfig: boolean;
+  cachePath?: string;
+}
+
 export interface AgentDefinition {
   id?: string;
   name: string;
@@ -105,6 +154,10 @@ export interface AgentRegistryRecord {
   middlewareConfig?: AgentMiddlewareConfig;
   interruptConfig?: AgentInterruptConfig;
   providerFallback?: AgentProviderFallback;
+  tierConfig?: AgentTierRoutingConfig;
+  budgetConfig?: AgentBudgetConfig;
+  ladderConfig?: AgentEscalationLadder;
+  cacheConfig?: AgentCacheConfig;
 }
 
 export interface AgentRegistry {

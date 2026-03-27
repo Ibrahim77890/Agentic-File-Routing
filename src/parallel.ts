@@ -10,6 +10,8 @@ export interface ParallelChildResult {
     content: string;
   }>;
   finalOutput?: unknown;
+  confidence?: number;
+  aborted?: boolean;
   durationMs?: number;
   error?: string;
 }

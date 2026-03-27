@@ -44,6 +44,7 @@ export class OpenAiProvider implements ILlmProvider {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json"
         },
+        signal: request.signal,
         body: JSON.stringify(payload)
       });
 

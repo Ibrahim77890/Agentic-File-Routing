@@ -15,6 +15,8 @@ export interface ParallelExecutionOptions {
   mode?: ParallelRuntimeMode;
   maxWorkers?: number;
   failFast?: boolean;
+  enableShortCircuit?: boolean;
+  shortCircuitConfidence?: number;
   remote?: RemoteWorkerConfig;
 }
 

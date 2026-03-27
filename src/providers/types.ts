@@ -31,6 +31,7 @@ export interface LlmCallRequest {
   tools: ProviderTool[];
   systemPrompt: string;
   config: ModelConfig;
+  signal?: AbortSignal;
 }
 
 export interface LlmCallResponse {

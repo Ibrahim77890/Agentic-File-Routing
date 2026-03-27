@@ -48,6 +48,7 @@ export class OpenRouterProvider implements ILlmProvider {
           "HTTP-Referer": "agentic-file-routing",
           "X-Title": "AFR - Agentic File Routing"
         },
+        signal: request.signal,
         body: JSON.stringify(payload)
       });
 

@@ -82,3 +82,10 @@ export class ProviderFallbackError extends AfrError {
     this.name = "ProviderFallbackError";
   }
 }
+
+export class BudgetExceededError extends AfrError {
+  constructor(message: string) {
+    super("BUDGET_EXCEEDED", message);
+    this.name = "BudgetExceededError";
+  }
+}

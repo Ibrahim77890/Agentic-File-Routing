@@ -42,6 +42,7 @@ export class AnthropicProvider implements ILlmProvider {
           "anthropic-version": "2023-06-01",
           "Content-Type": "application/json"
         },
+        signal: request.signal,
         body: JSON.stringify(payload)
       });
 

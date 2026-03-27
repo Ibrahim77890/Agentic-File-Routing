@@ -19,6 +19,7 @@ A powerful, file-system-routed hierarchical agent orchestration framework for Ja
 - [Shared Directory Context with layoutts](#shared-directory-context-with-layoutts)
 - [Human-in-the-Loop Breakpoint with interruptts](#human-in-the-loop-breakpoint-with-interruptts)
 - [Parallel Ensemble Routing with parallelts](#parallel-ensemble-routing-with-parallelts)
+- [Economic Orchestration (FinOps-for-Agents)](#economic-orchestration-finops-for-agents)
 - [NPM Readiness Enhancements](#npm-readiness-enhancements)
 - [Usage Guide](#usage-guide)
 - [API Reference](#api-reference)
@@ -75,6 +76,7 @@ root/
 - ✅ **Shared Directory Context** — layout.ts prompt prefixes inherited root → leaf
 - ✅ **Human-in-the-Loop Interrupts** — interrupt.ts breakpoints + resumeAgent(sessionId, approvalData)
 - ✅ **Parallel Ensemble Routing** — parallel.ts jury over concurrent child-agent outputs
+- ✅ **Economic Orchestration (FinOps)** — directory-scoped model tiers, escalation ladders, budgets, caching, and parallel short-circuiting
 - ✅ **Provider Fallback Chains** — fallback.ts for automatic provider/model failover
 - ✅ **Provider Agnostic** — Built-in adapters for OpenAI, Anthropic, and OpenRouter
 - ✅ **Zero External Dependencies** — HTTP fetch-based, no SDK bloat
@@ -239,6 +241,142 @@ src/agents/
 ```
 
 This makes safety boundaries and approval points visible directly in the file tree.
+
+## Economic Orchestration (FinOps-for-Agents)
+
+AFR now supports **directory-scoped economic governance** to reduce chain creep, latency, and unpredictable token spend.
+
+### 1) Tiered Model Routing (`tier.ts` / `model.ts`)
+
+Define model defaults at the folder level. Child folders inherit parent tiers and can override only specific fields.
+
+```text
+agents/
+├─ support/
+│  ├─ tier.ts              # cheap defaults for support branch
+│  ├─ faq/
+│  │  └─ index.ts
+│  └─ legal/
+│     ├─ tier.ts           # overrides to stronger model for legal subtree
+│     └─ index.ts
+```
+
+```typescript
+// agents/support/tier.ts
+export default {
+  provider: "openrouter",
+  modelId: "google/gemini-1.5-flash",
+  maxTokens: 600
+};
+```
+
+```typescript
+// agents/support/legal/tier.ts
+export default {
+  modelId: "anthropic/claude-3-5-sonnet"
+};
+```
+
+### 2) Escalation Ladder (`ladder.ts` + `simple.ts`)
+
+Run a cheap direct path first. Only escalate to full agent execution when your `simple.ts` returns `REASONING_REQUIRED`.
+
+```text
+agents/intake/
+├─ ladder.ts
+├─ simple.ts
+└─ index.ts
+```
+
+```typescript
+// agents/intake/ladder.ts
+export default {
+  enabled: true,
+  escalateSignal: "REASONING_REQUIRED"
+};
+```
+
+```typescript
+// agents/intake/simple.ts
+export async function run({ input }: { input: unknown }) {
+  const text = String(input ?? "");
+
+  if (text.length < 120 && !text.includes("analyze deeply")) {
+    return { output: `Quick answer: ${text}` };
+  }
+
+  return { status: "REASONING_REQUIRED" };
+}
+```
+
+### 3) Hierarchical Budgeting (`budget.ts`)
+
+Enforce hard limits on chain steps, aggregate tokens, and tool calls.
+
+```typescript
+// agents/risk-review/budget.ts
+export default {
+  maxSteps: 12,
+  maxTokens: 18000,
+  maxTools: 8
+};
+```
+
+Budgets merge down the call stack using the **strictest limit** per field.
+
+### 4) Recursive Path-Aware Caching (`cache.ts`)
+
+Cache output by `{agentPath + normalizedInput}` with folder-level TTL policies.
+
+```typescript
+// agents/news/cache.ts
+export default {
+  enabled: true,
+  ttlMs: 24 * 60 * 60 * 1000
+};
+```
+
+```typescript
+// agents/crypto/cache.ts
+export default {
+  enabled: true,
+  ttlMs: 10 * 60 * 1000
+};
+```
+
+### 5) Parallel Short-Circuiting
+
+In parallel branches, AFR can stop sibling LLM calls when one child returns high confidence.
+
+```typescript
+const result = await executeAgent(registry, "root", "Evaluate proposal", {}, {
+  modelConfig,
+  parallel: {
+    mode: "in-process",
+    enableShortCircuit: true,
+    shortCircuitConfidence: 0.95
+  }
+});
+```
+
+### FinOps Metadata + Dev Server Heatmap
+
+Each execution now includes economic metadata under:
+
+```typescript
+result.context.metadata.economic
+```
+
+And `afr dev` exposes a real-time FinOps endpoint:
+
+```text
+GET /api/finops
+```
+
+The dashboard renders:
+- Red folders: expensive/frontier-heavy or low cache-hit branches
+- Green folders: low-cost/high-cache optimized branches
+- Per-request COGS summary (e.g., cost and token usage for the latest request)
 
 ## Architecture
 

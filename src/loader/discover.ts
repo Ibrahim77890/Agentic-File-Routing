@@ -17,6 +17,11 @@ const MIDDLEWARE_FILES = ["middleware.ts", "middleware.js", "middleware.mjs", "m
 const INTERRUPT_FILES = ["interrupt.ts", "interrupt.js", "interrupt.mjs", "interrupt.cjs"];
 const PARALLEL_ORCHESTRATOR_FILES = ["parallel.ts", "parallel.js", "parallel.mjs", "parallel.cjs"];
 const FALLBACK_FILES = ["fallback.ts", "fallback.js", "fallback.mjs", "fallback.cjs"];
+const TIER_FILES = ["tier.ts", "tier.js", "tier.mjs", "tier.cjs", "model.ts", "model.js", "model.mjs", "model.cjs"];
+const BUDGET_FILES = ["budget.ts", "budget.js", "budget.mjs", "budget.cjs"];
+const LADDER_FILES = ["ladder.ts", "ladder.js", "ladder.mjs", "ladder.cjs"];
+const SIMPLE_FILES = ["simple.ts", "simple.js", "simple.mjs", "simple.cjs"];
+const CACHE_FILES = ["cache.ts", "cache.js", "cache.mjs", "cache.cjs"];
 const DEBATE_FOLDER = "+debate";
 const NUMBERED_AGENT_REGEX = /^(\d+)_(.+)\.(ts|js|mjs|cjs)$/;
 
@@ -33,6 +38,15 @@ interface DiscoveredAgentNodeWithSequential extends DiscoveredAgentNode {
   interruptPath?: string;
   hasFallback?: boolean;
   fallbackPath?: string;
+  hasTier?: boolean;
+  tierPath?: string;
+  hasBudget?: boolean;
+  budgetPath?: string;
+  hasLadder?: boolean;
+  ladderPath?: string;
+  simplePath?: string;
+  hasCache?: boolean;
+  cachePath?: string;
 }
 
 export function discoverAgentTree(agentsRootDir: string): DiscoveredAgentNodeWithSequential {
@@ -132,6 +146,26 @@ function discoverNode(dirPath: string, segmentsFromRoot: SegmentDescriptor[]): D
     entries.some((entry) => entry.isFile() && entry.name === fileName)
   );
 
+  const tierFile = TIER_FILES.find((fileName) =>
+    entries.some((entry) => entry.isFile() && entry.name === fileName)
+  );
+
+  const budgetFile = BUDGET_FILES.find((fileName) =>
+    entries.some((entry) => entry.isFile() && entry.name === fileName)
+  );
+
+  const ladderFile = LADDER_FILES.find((fileName) =>
+    entries.some((entry) => entry.isFile() && entry.name === fileName)
+  );
+
+  const simpleFile = SIMPLE_FILES.find((fileName) =>
+    entries.some((entry) => entry.isFile() && entry.name === fileName)
+  );
+
+  const cacheFile = CACHE_FILES.find((fileName) =>
+    entries.some((entry) => entry.isFile() && entry.name === fileName)
+  );
+
   let sequentialWorkflow: SequentialWorkflowMetadata | undefined;
   if (numberedAgents.length > 0) {
     if (!hasOrchestratorFile) {
@@ -198,6 +232,27 @@ function discoverNode(dirPath: string, segmentsFromRoot: SegmentDescriptor[]): D
   if (fallbackFile) {
     node.hasFallback = true;
     node.fallbackPath = join(dirPath, fallbackFile);
+  }
+
+  if (tierFile) {
+    node.hasTier = true;
+    node.tierPath = join(dirPath, tierFile);
+  }
+
+  if (budgetFile) {
+    node.hasBudget = true;
+    node.budgetPath = join(dirPath, budgetFile);
+  }
+
+  if (ladderFile || simpleFile) {
+    node.hasLadder = true;
+    node.ladderPath = ladderFile ? join(dirPath, ladderFile) : undefined;
+    node.simplePath = simpleFile ? join(dirPath, simpleFile) : undefined;
+  }
+
+  if (cacheFile) {
+    node.hasCache = true;
+    node.cachePath = join(dirPath, cacheFile);
   }
 
   return node;

@@ -11,6 +11,10 @@ import {
   AgentMiddlewareConfig,
   AgentInterruptConfig,
   AgentProviderFallback,
+  AgentTierRoutingConfig,
+  AgentBudgetConfig,
+  AgentEscalationLadder,
+  AgentCacheConfig,
   BuildRegistryOptions,
   DiscoveredAgentNode,
   SequentialWorkflowMetadata,
@@ -54,6 +58,15 @@ async function buildNodeRecord(
     interruptPath?: string;
     hasFallback?: boolean;
     fallbackPath?: string;
+    hasTier?: boolean;
+    tierPath?: string;
+    hasBudget?: boolean;
+    budgetPath?: string;
+    hasLadder?: boolean;
+    ladderPath?: string;
+    simplePath?: string;
+    hasCache?: boolean;
+    cachePath?: string;
   },
   records: Record<string, AgentRegistryRecord>,
   rootLogicalPath: string,
@@ -112,6 +125,35 @@ async function buildNodeRecord(
       }
     : undefined;
 
+  const tierConfig: AgentTierRoutingConfig | undefined = node.hasTier
+    ? {
+        hasTierConfig: true,
+        tierPath: node.tierPath
+      }
+    : undefined;
+
+  const budgetConfig: AgentBudgetConfig | undefined = node.hasBudget
+    ? {
+        hasBudgetConfig: true,
+        budgetPath: node.budgetPath
+      }
+    : undefined;
+
+  const ladderConfig: AgentEscalationLadder | undefined = node.hasLadder
+    ? {
+        hasLadderConfig: true,
+        ladderPath: node.ladderPath,
+        simplePath: node.simplePath
+      }
+    : undefined;
+
+  const cacheConfig: AgentCacheConfig | undefined = node.hasCache
+    ? {
+        hasCacheConfig: true,
+        cachePath: node.cachePath
+      }
+    : undefined;
+
   const tools: AgentTool[] = node.children.map((child) => {
     const childLogicalPath = toLogicalPath(child.segmentsFromRoot, rootLogicalPath);
     const childRoutePattern = toRoutePattern(child.segmentsFromRoot);
@@ -148,7 +190,11 @@ async function buildNodeRecord(
     layoutConfig,
     middlewareConfig,
     interruptConfig,
-    providerFallback
+    providerFallback,
+    tierConfig,
+    budgetConfig,
+    ladderConfig,
+    cacheConfig
   };
 
   if (definition) {
