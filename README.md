@@ -13,6 +13,7 @@ A powerful, file-system-routed hierarchical agent orchestration framework for Ja
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
+- [Shortcut Delegation (Hub-and-Spoke)](#shortcut-delegation-hub-and-spoke)
 - [Sequential Chain Orchestration](#sequential-chain-orchestration)
 - [Localized MCP Tool Injection](#localized-mcp-tool-injection)
 - [Guardrail Middleware Pattern](#guardrail-middleware-pattern)
@@ -70,6 +71,7 @@ root/
 - ✅ **File-Based Routing** — Folder structure defines agent topology (no JSON configs)
 - ✅ **Hierarchical Tool Exposure** — Each agent sees only its direct children
 - ✅ **Recursive Composition** — Unlimited nesting; all agents follow same interface
+- ✅ **Shortcut Delegation (Hub-and-Spoke)** — Root can target leaf workers directly with optional router.ts passthrough
 - ✅ **Sequential Chain Orchestration** — Explicit numbered agent workflows (0_step.ts → 1_step.ts → linear.ts)
 - ✅ **Localized MCP Tool Injection** — Folder-scoped Model Context Protocol servers (mcp_tools.ts per folder)
 - ✅ **Guardrail Middleware Pattern** — Branch-level middleware.ts hooks for input/output controls
@@ -241,6 +243,83 @@ src/agents/
 ```
 
 This makes safety boundaries and approval points visible directly in the file tree.
+
+## Shortcut Delegation (Hub-and-Spoke)
+
+AFR supports a low-latency delegation pattern that removes unnecessary manager LLM turns.
+
+### File Structure Pattern
+
+```text
+src/agents/
+├─ index.ts                    # Root orchestrator
+├─ marketing/
+│  ├─ index.ts                 # Optional manager definition
+│  ├─ router.ts                # Zero-token passthrough router
+│  ├─ layout.ts                # Shared marketing context
+│  ├─ copywriting/
+│  │  └─ index.ts              # Leaf worker
+│  └─ seo/
+│     └─ index.ts              # Leaf worker
+└─ devops/
+   ├─ index.ts
+   ├─ router.ts
+   └─ incident/
+      └─ index.ts
+```
+
+### 1) Flattened Leaf Tool Injection
+
+Set `flattened: true` to expose leaf workers directly on root (for example `marketing_copywriting`, `marketing_seo`, `devops_incident`).
+
+```typescript
+const registry = await buildAgentRegistry({
+  agentsRootDir: "./src/agents",
+  loadDefinitions: true,
+  flattened: true
+});
+```
+
+You can also pass an object for advanced control:
+
+```typescript
+flattened: {
+  enabled: true,
+  exposeOnPaths: ["root"],
+  toolNameStyle: "underscore", // or "dot"
+  includeIntermediateTools: false
+}
+```
+
+### 2) router.ts Passthrough
+
+When a folder has `router.ts`, AFR executes that file first and can skip the manager LLM call entirely.
+
+```typescript
+export function route(request: { userInput: string }) {
+  if (request.userInput.toLowerCase().includes("seo")) {
+    return { targetPath: "marketing.seo" };
+  }
+
+  return { targetPath: "marketing.copywriting" };
+}
+
+export default route;
+```
+
+Routers can return:
+- `string` target path
+- `{ targetPath, userInput?, metadata? }`
+- `null` to fall back to normal manager execution
+
+Router guardrails:
+- Must target a descendant path (for example `marketing.*` from `marketing/router.ts`)
+- Cannot route to itself
+- Target must exist in the registry
+
+### 3) Direct-to-Root Result Buffer
+
+All frame completions publish into a shared session output buffer. This allows leaf outputs to be captured immediately at parent/root level without extra summarize-and-bubble LLM turns.
 
 ## Economic Orchestration (FinOps-for-Agents)
 

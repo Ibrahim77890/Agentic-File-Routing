@@ -14,11 +14,24 @@ export interface ExecutionContext {
   metadata: Record<string, unknown>;
 }
 
+export interface DirectOutputEvent {
+  sourcePath: string;
+  output: unknown;
+  timestamp: number;
+  callStack: string[];
+}
+
+export interface SharedSessionBuffer {
+  finalOutputs: DirectOutputEvent[];
+  latestFinalOutput?: DirectOutputEvent;
+}
+
 export interface SessionFrame {
   context: ExecutionContext;
   messages: Message[];
   toolResults: Map<string, unknown>;
   childFrames: SessionFrame[];
+  sharedBuffer: SharedSessionBuffer;
 }
 
 export function createExecutionContext(
@@ -49,12 +62,14 @@ export function createChildExecutionContext(
   childPath: string,
   localOverrides: Record<string, unknown> = {}
 ): ExecutionContext {
+  const expandedCallStack = expandCallStackForChild(parentContext.callStack, childPath);
+
   const newContext: ExecutionContext = {
     ...parentContext,
     currentPath: childPath,
     parentPath: parentContext.currentPath,
     depth: parentContext.depth + 1,
-    callStack: [...parentContext.callStack, childPath],
+    callStack: expandedCallStack,
     localOverrides,
     startTime: Date.now()
   };
@@ -62,12 +77,18 @@ export function createChildExecutionContext(
   return newContext;
 }
 
-export function createSessionFrame(context: ExecutionContext): SessionFrame {
+export function createSessionFrame(
+  context: ExecutionContext,
+  sharedBuffer?: SharedSessionBuffer
+): SessionFrame {
   return {
     context,
     messages: [],
     toolResults: new Map(),
-    childFrames: []
+    childFrames: [],
+    sharedBuffer: sharedBuffer ?? {
+      finalOutputs: []
+    }
   };
 }
 
@@ -97,4 +118,31 @@ export function resolveContextValue(
   }
 
   return undefined;
+}
+
+function expandCallStackForChild(parentCallStack: string[], childPath: string): string[] {
+  const expanded = [...parentCallStack];
+
+  for (const ancestor of toPathLineage(childPath)) {
+    if (expanded[expanded.length - 1] === ancestor) {
+      continue;
+    }
+
+    if (!expanded.includes(ancestor)) {
+      expanded.push(ancestor);
+    }
+  }
+
+  return expanded;
+}
+
+function toPathLineage(logicalPath: string): string[] {
+  const segments = logicalPath.split(".").filter(Boolean);
+  const lineage: string[] = [];
+
+  for (let i = 0; i < segments.length; i += 1) {
+    lineage.push(segments.slice(0, i + 1).join("."));
+  }
+
+  return lineage;
 }

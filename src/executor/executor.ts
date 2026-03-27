@@ -5,7 +5,14 @@ import {
   SnapshotNotFoundError,
   BudgetExceededError
 } from "../errors.js";
-import { AgentRegistry, AgentRegistryRecord, SnapshotStore, type BudgetConfig } from "../types.js";
+import {
+  AgentRegistry,
+  AgentRegistryRecord,
+  SnapshotStore,
+  AgentRouterHandler,
+  AgentRouterRequest,
+  type BudgetConfig
+} from "../types.js";
 import type { ModelConfig } from "../providers/types.js";
 import { createProvider, registryToolToProviderTool } from "../providers/index.js";
 import type { Middleware } from "../middleware/types.js";
@@ -38,6 +45,7 @@ import {
   createSessionFrame,
   mergeContextWithLocalConfig
 } from "./session.js";
+import { importRuntimeModule } from "../loader/module-resolver.js";
 import {
   Message,
   ToolCall,
@@ -102,6 +110,7 @@ export class AfrExecutor {
   private workerPool: WorkerPool | null;
   private remoteProvider: RemoteProvider | null;
   private pathCache: InMemoryPathCache;
+  private routerCache: Map<string, AgentRouterHandler>;
 
   private static readonly DEFAULT_PARALLEL_OPTIONS: ParallelExecutionOptions = {
     mode: "in-process",
@@ -136,6 +145,7 @@ export class AfrExecutor {
     this.workerPool = null;
     this.remoteProvider = null;
     this.pathCache = getSharedPathCache();
+    this.routerCache = new Map();
     this.telemetry = this.options.telemetryEnabled
       ? createTelemetry("session-id", "trace-id")
       : null;
@@ -405,7 +415,7 @@ export class AfrExecutor {
         frame.messages.push(
           createAssistantMessage(`Cache hit for ${mergedContext.currentPath}: ${JSON.stringify(cacheHit.value)}`)
         );
-        frame.context.metadata.finalOutput = cacheHit.value;
+        this.setFinalOutput(frame, cacheHit.value);
         this.publishEconomicSummary(mergedContext, budget);
         return;
       }
@@ -413,7 +423,7 @@ export class AfrExecutor {
       const ladder = await this.tryExecuteEscalationLadder(record, mergedContext, cacheInput);
       if (ladder.handled) {
         frame.messages.push(createAssistantMessage(`Escalation ladder resolved: ${JSON.stringify(ladder.output)}`));
-        frame.context.metadata.finalOutput = ladder.output;
+        this.setFinalOutput(frame, ladder.output);
         await this.tryWriteToCache(mergedContext, cacheInput, ladder.output);
         this.publishEconomicSummary(mergedContext, budget);
         return;
@@ -440,7 +450,7 @@ export class AfrExecutor {
         if (sequentialResult.success && sequentialResult.output) {
           const content = `Sequential workflow executed: ${JSON.stringify(sequentialResult.output)}`;
           frame.messages.push(createAssistantMessage(content));
-          frame.context.metadata.finalOutput = sequentialResult.output;
+          this.setFinalOutput(frame, sequentialResult.output);
           await this.tryWriteToCache(mergedContext, cacheInput, sequentialResult.output);
           this.publishEconomicSummary(mergedContext, budget);
           return;
@@ -465,7 +475,7 @@ export class AfrExecutor {
       // Check for parallel workflow execution
       if (record.parallelWorkflow && record.childrenPaths.length > 0) {
         const parallelOutput = await this.executeParallelBranch(record, frame);
-        frame.context.metadata.finalOutput = parallelOutput;
+        this.setFinalOutput(frame, parallelOutput);
         await this.tryWriteToCache(mergedContext, cacheInput, parallelOutput);
         this.publishEconomicSummary(mergedContext, budget);
         return;
@@ -510,7 +520,7 @@ export class AfrExecutor {
         };
 
         frame.messages.push(finalizedAssistantMessage);
-        frame.context.metadata.finalOutput = finalizedAssistantMessage.content;
+        this.setFinalOutput(frame, finalizedAssistantMessage.content);
 
         if (finalizedAssistantMessage.toolCalls && finalizedAssistantMessage.toolCalls.length > 0) {
           for (const toolCall of finalizedAssistantMessage.toolCalls) {
@@ -597,7 +607,7 @@ export class AfrExecutor {
         });
 
         if (onErrorResult.handled) {
-          frame.context.metadata.finalOutput = onErrorResult.replacement;
+          this.setFinalOutput(frame, onErrorResult.replacement);
           return;
         }
       }
@@ -890,7 +900,7 @@ export class AfrExecutor {
       ...childContext.metadata,
       abortSignal: abortController?.signal
     };
-    const childFrame = createSessionFrame(childContext);
+    const childFrame = createSessionFrame(childContext, parentFrame.sharedBuffer);
     childFrame.messages.push(createUserMessage(userInput));
 
     try {
@@ -1195,6 +1205,163 @@ export class AfrExecutor {
     return undefined;
   }
 
+  private setFinalOutput(frame: SessionFrame, output: unknown): void {
+    frame.context.metadata.finalOutput = output;
+    this.publishDirectOutput(frame, output);
+  }
+
+  private publishDirectOutput(frame: SessionFrame, output: unknown): void {
+    if (output === undefined) {
+      return;
+    }
+
+    const event = {
+      sourcePath: frame.context.currentPath,
+      output,
+      timestamp: Date.now(),
+      callStack: [...frame.context.callStack]
+    };
+
+    frame.sharedBuffer.finalOutputs.push(event);
+    frame.sharedBuffer.latestFinalOutput = event;
+    frame.context.metadata.latestDirectOutput = event;
+    frame.context.metadata.sharedOutputs = frame.sharedBuffer.finalOutputs;
+  }
+
+  private resolveToolCallInput(toolCall: ToolCall, parentFrame: SessionFrame): string {
+    const args = toolCall.arguments ?? {};
+    const explicitInput = [
+      args.input,
+      args.query,
+      args.task,
+      args.prompt,
+      args.request
+    ].find((value) => typeof value === "string" && value.trim().length > 0);
+
+    if (typeof explicitInput === "string") {
+      if (explicitInput.trim().toLowerCase() === "auto-delegated") {
+        // Simulation fallback uses this placeholder argument; prefer real parent input.
+      } else {
+        return explicitInput;
+      }
+    }
+
+    const lastUserMessage = [...parentFrame.messages].reverse().find((msg) => msg.role === "user");
+    if (lastUserMessage?.content) {
+      return lastUserMessage.content;
+    }
+
+    const globalUserInput = parentFrame.context.globalContext.userInput;
+    if (typeof globalUserInput === "string" && globalUserInput.trim().length > 0) {
+      return globalUserInput;
+    }
+
+    if (Object.keys(args).length > 0) {
+      return JSON.stringify(args);
+    }
+
+    return `Delegated task via tool ${toolCall.toolName}`;
+  }
+
+  private async resolvePassthroughRoute(
+    proposedChildPath: string,
+    childRecord: AgentRegistryRecord,
+    toolCall: ToolCall,
+    parentFrame: SessionFrame,
+    delegatedInput: string
+  ): Promise<{ targetPath: string; userInput: string; metadata?: Record<string, unknown> } | null> {
+    const routerPath = childRecord.routerConfig?.routerPath;
+    if (!routerPath) {
+      return null;
+    }
+
+    const router = await this.loadRouterHandler(routerPath);
+    const request: AgentRouterRequest = {
+      parentPath: parentFrame.context.currentPath,
+      routerPath: proposedChildPath,
+      proposedTargetPath: proposedChildPath,
+      userInput: delegatedInput,
+      toolName: toolCall.toolName,
+      arguments: toolCall.arguments ?? {},
+      sessionId: parentFrame.context.sessionId,
+      traceId: parentFrame.context.traceId,
+      callStack: [...parentFrame.context.callStack],
+      availableChildren: [...childRecord.childrenPaths],
+      metadata: {
+        ...parentFrame.context.metadata
+      }
+    };
+
+    const rawResult = await router(request);
+    if (!rawResult) {
+      return null;
+    }
+
+    const normalized: {
+      targetPath: string;
+      userInput?: string;
+      metadata?: Record<string, unknown>;
+    } = typeof rawResult === "string"
+      ? { targetPath: rawResult }
+      : rawResult;
+
+    const targetPath = normalized.targetPath?.trim();
+    if (!targetPath) {
+      throw new RoutingError(`Router at ${proposedChildPath} returned an empty target path.`);
+    }
+
+    if (targetPath === proposedChildPath) {
+      throw new RoutingError(`Router at ${proposedChildPath} cannot route back to itself.`);
+    }
+
+    if (!targetPath.startsWith(`${proposedChildPath}.`)) {
+      throw new RoutingError(
+        `Router at ${proposedChildPath} returned ${targetPath}, but passthrough routers can only target descendants.`
+      );
+    }
+
+    if (!this.registry.records[targetPath]) {
+      throw new RoutingError(`Router at ${proposedChildPath} resolved unknown target path: ${targetPath}`);
+    }
+
+    return {
+      targetPath,
+      userInput: normalized.userInput ?? delegatedInput,
+      metadata: normalized.metadata
+    };
+  }
+
+  private async loadRouterHandler(routerPath: string): Promise<AgentRouterHandler> {
+    const cached = this.routerCache.get(routerPath);
+    if (cached) {
+      return cached;
+    }
+
+    const mod = await importRuntimeModule(routerPath);
+    const direct = (mod.default ?? mod.route ?? mod.router) as unknown;
+    const nestedDefault =
+      direct && typeof direct === "object"
+        ? (direct as Record<string, unknown>).default
+        : undefined;
+
+    const candidate = (
+      typeof direct === "function"
+        ? direct
+        : typeof nestedDefault === "function"
+          ? nestedDefault
+          : undefined
+    ) as AgentRouterHandler | undefined;
+
+    if (typeof candidate !== "function") {
+      throw new ExecutionError(
+        `Invalid router module at ${routerPath}. Expected default export or named export: route/router.`
+      );
+    }
+
+    this.routerCache.set(routerPath, candidate);
+    return candidate;
+  }
+
   private simulationFallback(record: AgentRegistryRecord): AssistantMessage | null {
     if (record.tools.length === 0) {
       const response = `Executed leaf agent: ${record.logicalPath}`;
@@ -1220,12 +1387,30 @@ export class AfrExecutor {
     const { context: parentContext } = parentFrame;
 
     try {
-      const childPath = toolCall.targetPath;
-      const childRecord = this.registry.records[childPath];
+      const proposedChildPath = toolCall.targetPath;
+      const proposedChildRecord = this.registry.records[proposedChildPath];
 
+      if (!proposedChildRecord) {
+        throw new RoutingError(
+          `Tool routing failed: ${toolCall.toolName} -> ${proposedChildPath} not found in registry`
+        );
+      }
+
+      const delegatedInput = this.resolveToolCallInput(toolCall, parentFrame);
+      const routed = await this.resolvePassthroughRoute(
+        proposedChildPath,
+        proposedChildRecord,
+        toolCall,
+        parentFrame,
+        delegatedInput
+      );
+
+      const childPath = routed?.targetPath ?? proposedChildPath;
+      const childInput = routed?.userInput ?? delegatedInput;
+      const childRecord = this.registry.records[childPath];
       if (!childRecord) {
         throw new RoutingError(
-          `Tool routing failed: ${toolCall.toolName} -> ${childPath} not found in registry`
+          `Tool routing failed after router resolution: ${toolCall.toolName} -> ${childPath} not found in registry`
         );
       }
 
@@ -1235,17 +1420,39 @@ export class AfrExecutor {
         childRecord.config
       );
 
-      const childFrame = createSessionFrame(childContext);
+      childContext.globalContext = {
+        ...childContext.globalContext,
+        userInput: childInput,
+        delegatedBy: parentContext.currentPath,
+        delegatedTool: toolCall.toolName
+      };
+
+      if (routed) {
+        childContext.metadata.router = {
+          routedFrom: proposedChildPath,
+          routedTo: childPath,
+          metadata: routed.metadata
+        };
+      }
+
+      const childFrame = createSessionFrame(childContext, parentFrame.sharedBuffer);
+      childFrame.messages.push(createUserMessage(childInput));
 
       await this.executeFrame(childFrame);
 
       parentFrame.childFrames.push(childFrame);
 
+      if (childFrame.context.metadata.finalOutput !== undefined) {
+        this.setFinalOutput(parentFrame, childFrame.context.metadata.finalOutput);
+      }
+
       const result = {
         success: true,
         childPath,
+        routedFrom: routed ? proposedChildPath : undefined,
         messages: childFrame.messages.length,
-        frames: childFrame.childFrames.length
+        frames: childFrame.childFrames.length,
+        output: childFrame.context.metadata.finalOutput
       };
 
       return createToolResultMessage(toolCall.id, toolCall.toolName, result, false);

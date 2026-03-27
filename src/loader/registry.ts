@@ -10,12 +10,14 @@ import {
   AgentLayoutConfig,
   AgentMiddlewareConfig,
   AgentInterruptConfig,
+  AgentRouterConfig,
   AgentProviderFallback,
   AgentTierRoutingConfig,
   AgentBudgetConfig,
   AgentEscalationLadder,
   AgentCacheConfig,
   BuildRegistryOptions,
+  FlattenedRegistryOptions,
   DiscoveredAgentNode,
   SequentialWorkflowMetadata,
   ParallelWorkflowMetadata
@@ -35,8 +37,12 @@ export async function buildAgentRegistry(options: BuildRegistryOptions): Promise
   const rootNode = discoverAgentTree(options.agentsRootDir);
   const records: Record<string, AgentRegistryRecord> = {};
   const mcpLoader = new MCPConfigLoader();
+  const flattenedOptions = resolveFlattenedOptions(options.flattened, rootLogicalPath);
 
   await buildNodeRecord(rootNode, records, rootLogicalPath, options, mcpLoader);
+  if (flattenedOptions.enabled) {
+    injectFlattenedTools(records, flattenedOptions);
+  }
 
   return {
     rootPath: rootLogicalPath,
@@ -56,6 +62,8 @@ async function buildNodeRecord(
     middlewarePath?: string;
     hasInterrupt?: boolean;
     interruptPath?: string;
+    hasRouter?: boolean;
+    routerPath?: string;
     hasFallback?: boolean;
     fallbackPath?: string;
     hasTier?: boolean;
@@ -115,6 +123,13 @@ async function buildNodeRecord(
     ? {
         hasInterrupt: true,
         interruptPath: node.interruptPath
+      }
+    : undefined;
+
+  const routerConfig: AgentRouterConfig | undefined = node.hasRouter
+    ? {
+        hasRouter: true,
+        routerPath: node.routerPath
       }
     : undefined;
 
@@ -190,6 +205,7 @@ async function buildNodeRecord(
     layoutConfig,
     middlewareConfig,
     interruptConfig,
+    routerConfig,
     providerFallback,
     tierConfig,
     budgetConfig,
@@ -267,4 +283,133 @@ function validateAgentDefinition(definition: AgentDefinition, entryFilePath: str
       `Invalid agent definition in ${entryFilePath}. Missing required fields: ${missing.join(", ")}.`
     );
   }
+}
+
+interface NormalizedFlattenedRegistryOptions {
+  enabled: boolean;
+  exposeOnPaths: string[];
+  toolNameStyle: "underscore" | "dot";
+  includeIntermediateTools: boolean;
+}
+
+function resolveFlattenedOptions(
+  option: BuildRegistryOptions["flattened"],
+  rootLogicalPath: string
+): NormalizedFlattenedRegistryOptions {
+  if (!option) {
+    return {
+      enabled: false,
+      exposeOnPaths: [rootLogicalPath],
+      toolNameStyle: "underscore",
+      includeIntermediateTools: false
+    };
+  }
+
+  if (option === true) {
+    return {
+      enabled: true,
+      exposeOnPaths: [rootLogicalPath],
+      toolNameStyle: "underscore",
+      includeIntermediateTools: false
+    };
+  }
+
+  const typed = option as FlattenedRegistryOptions;
+  return {
+    enabled: typed.enabled ?? true,
+    exposeOnPaths: typed.exposeOnPaths && typed.exposeOnPaths.length > 0
+      ? typed.exposeOnPaths
+      : [rootLogicalPath],
+    toolNameStyle: typed.toolNameStyle ?? "underscore",
+    includeIntermediateTools: typed.includeIntermediateTools ?? false
+  };
+}
+
+function injectFlattenedTools(
+  records: Record<string, AgentRegistryRecord>,
+  options: NormalizedFlattenedRegistryOptions
+): void {
+  const allPaths = Object.keys(records);
+  const flattenedTargets = allPaths.filter((logicalPath) => {
+    const record = records[logicalPath];
+    if (!record) {
+      return false;
+    }
+
+    if (options.includeIntermediateTools) {
+      return true;
+    }
+
+    return record.childrenPaths.length === 0;
+  });
+
+  for (const exposePath of options.exposeOnPaths) {
+    const parentRecord = records[exposePath];
+    if (!parentRecord) {
+      continue;
+    }
+
+    const existingTargets = new Set(parentRecord.tools.map((tool) => tool.targetPath));
+    const existingNames = new Set(parentRecord.tools.map((tool) => tool.name));
+
+    for (const targetPath of flattenedTargets) {
+      if (targetPath === exposePath || existingTargets.has(targetPath)) {
+        continue;
+      }
+
+      const targetRecord = records[targetPath];
+      if (!targetRecord) {
+        continue;
+      }
+
+      const schema = targetRecord.definition?.inputSchema ?? DEFAULT_INPUT_SCHEMA;
+      const baseName = formatFlattenedToolName(targetPath, options.toolNameStyle);
+      const toolName = ensureUniqueToolName(baseName, existingNames);
+
+      parentRecord.tools.push({
+        name: toolName,
+        description: targetRecord.definition?.description ?? `Delegate work to ${targetPath}`,
+        schema,
+        targetPath,
+        routePattern: targetRecord.routePattern
+      });
+
+      existingTargets.add(targetPath);
+      existingNames.add(toolName);
+    }
+
+    if (parentRecord.definition) {
+      parentRecord.definition.tools = parentRecord.tools;
+    }
+  }
+}
+
+function formatFlattenedToolName(
+  logicalPath: string,
+  style: NormalizedFlattenedRegistryOptions["toolNameStyle"]
+): string {
+  if (style === "dot") {
+    return logicalPath
+      .replace(/[^A-Za-z0-9_.-]/g, "_")
+      .replace(/^\.+|\.+$/g, "")
+      .replace(/\.{2,}/g, ".");
+  }
+
+  return logicalPath
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_+/g, "_");
+}
+
+function ensureUniqueToolName(baseName: string, existingNames: Set<string>): string {
+  if (!existingNames.has(baseName)) {
+    return baseName;
+  }
+
+  let index = 2;
+  while (existingNames.has(`${baseName}_${index}`)) {
+    index += 1;
+  }
+
+  return `${baseName}_${index}`;
 }

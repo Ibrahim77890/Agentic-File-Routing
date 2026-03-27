@@ -33,6 +33,35 @@ export interface AgentInterruptConfig {
   interruptPath?: string;
 }
 
+export interface AgentRouterConfig {
+  hasRouter: boolean;
+  routerPath?: string;
+}
+
+export interface AgentRouterRequest {
+  parentPath: string;
+  routerPath: string;
+  proposedTargetPath: string;
+  userInput: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  sessionId: string;
+  traceId: string;
+  callStack: string[];
+  availableChildren: string[];
+  metadata: Record<string, unknown>;
+}
+
+export interface AgentRouterResolution {
+  targetPath: string;
+  userInput?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export type AgentRouterHandler = (
+  request: AgentRouterRequest
+) => Promise<string | AgentRouterResolution | null | undefined> | string | AgentRouterResolution | null | undefined;
+
 export interface ParallelWorkflowMetadata {
   hasParallelOrchestrator: boolean;
   orchestratorPath?: string;
@@ -153,6 +182,7 @@ export interface AgentRegistryRecord {
   layoutConfig?: AgentLayoutConfig;
   middlewareConfig?: AgentMiddlewareConfig;
   interruptConfig?: AgentInterruptConfig;
+  routerConfig?: AgentRouterConfig;
   providerFallback?: AgentProviderFallback;
   tierConfig?: AgentTierRoutingConfig;
   budgetConfig?: AgentBudgetConfig;
@@ -170,6 +200,14 @@ export interface BuildRegistryOptions {
   rootLogicalPath?: string;
   loadDefinitions?: boolean;
   strictDefinitionLoading?: boolean;
+  flattened?: boolean | FlattenedRegistryOptions;
+}
+
+export interface FlattenedRegistryOptions {
+  enabled?: boolean;
+  exposeOnPaths?: string[];
+  toolNameStyle?: "underscore" | "dot";
+  includeIntermediateTools?: boolean;
 }
 
 export interface SequentialAgentObject {

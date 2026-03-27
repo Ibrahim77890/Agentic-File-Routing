@@ -15,6 +15,7 @@ const MCP_CONFIG_FILE = "mcp_tools.ts";
 const LAYOUT_FILES = ["layout.ts", "layout.js", "layout.mjs", "layout.cjs"];
 const MIDDLEWARE_FILES = ["middleware.ts", "middleware.js", "middleware.mjs", "middleware.cjs"];
 const INTERRUPT_FILES = ["interrupt.ts", "interrupt.js", "interrupt.mjs", "interrupt.cjs"];
+const ROUTER_FILES = ["router.ts", "router.js", "router.mjs", "router.cjs"];
 const PARALLEL_ORCHESTRATOR_FILES = ["parallel.ts", "parallel.js", "parallel.mjs", "parallel.cjs"];
 const FALLBACK_FILES = ["fallback.ts", "fallback.js", "fallback.mjs", "fallback.cjs"];
 const TIER_FILES = ["tier.ts", "tier.js", "tier.mjs", "tier.cjs", "model.ts", "model.js", "model.mjs", "model.cjs"];
@@ -36,6 +37,8 @@ interface DiscoveredAgentNodeWithSequential extends DiscoveredAgentNode {
   middlewarePath?: string;
   hasInterrupt?: boolean;
   interruptPath?: string;
+  hasRouter?: boolean;
+  routerPath?: string;
   hasFallback?: boolean;
   fallbackPath?: string;
   hasTier?: boolean;
@@ -99,6 +102,10 @@ function discoverNode(dirPath: string, segmentsFromRoot: SegmentDescriptor[]): D
   );
 
   const parallelOrchestratorFile = PARALLEL_ORCHESTRATOR_FILES.find((fileName) =>
+    entries.some((entry) => entry.isFile() && entry.name === fileName)
+  );
+
+  const routerFile = ROUTER_FILES.find((fileName) =>
     entries.some((entry) => entry.isFile() && entry.name === fileName)
   );
 
@@ -227,6 +234,11 @@ function discoverNode(dirPath: string, segmentsFromRoot: SegmentDescriptor[]): D
   if (interruptFile) {
     node.hasInterrupt = true;
     node.interruptPath = join(dirPath, interruptFile);
+  }
+
+  if (routerFile) {
+    node.hasRouter = true;
+    node.routerPath = join(dirPath, routerFile);
   }
 
   if (fallbackFile) {
